@@ -11,53 +11,71 @@ app.use(cors());
 app.use(express.json());
 
 // ============================================================
-// COOKIES - Read from Secret Files
+// COOKIES - Check ALL possible locations
 // ============================================================
 
 function findCookiesFile() {
-    // Secret files are available at /etc/secrets/<filename>
-    const secretPath = '/etc/secrets/cookies.txt';
-    
-    if (fs.existsSync(secretPath)) {
-        console.log(`✅ Found cookies at: ${secretPath}`);
-        return secretPath;
-    }
-    
-    // Fallback paths (for local development)
-    const fallbackPaths = [
+    // All possible locations where cookies could be
+    const possiblePaths = [
+        // Render Secret Files location
+        '/etc/secrets/cookies.txt',
+        // Current directory
         './cookies.txt',
         path.join(__dirname, 'cookies.txt'),
         path.join(process.cwd(), 'cookies.txt'),
-        '/tmp/cookies.txt'
-    ];
+        // Render root
+        '/opt/render/project/src/cookies.txt',
+        // /tmp directory
+        '/tmp/cookies.txt',
+        // User home
+        process.env.HOME ? path.join(process.env.HOME, 'cookies.txt') : null,
+        // Render secrets alternative
+        '/secrets/cookies.txt'
+    ].filter(Boolean); // Remove null values
     
-    for (const p of fallbackPaths) {
+    // Log all paths we're checking
+    console.log('🔍 Checking for cookies at:');
+    for (const p of possiblePaths) {
+        console.log(`   ${p}`);
         if (fs.existsSync(p)) {
             console.log(`✅ Found cookies at: ${p}`);
             return p;
         }
     }
     
-    console.log('⚠️  No cookies file found');
-    console.log('📌 Add cookies.txt as a Secret File in Render:');
-    console.log('   1. Go to your service → Secrets tab');
-    console.log('   2. Click "Add Secret File"');
-    console.log('   3. Filename: cookies.txt');
-    console.log('   4. Paste your cookie content');
-    console.log('   5. Save and redeploy');
+    // Also try to read from environment variable as fallback
+    const cookiesBase64 = process.env.COOKIES_BASE64;
+    if (cookiesBase64) {
+        try {
+            console.log('📌 Found COOKIES_BASE64 env variable, decoding...');
+            const cookieBuffer = Buffer.from(cookiesBase64, 'base64');
+            const cookieContent = cookieBuffer.toString('utf8');
+            const tempPath = '/tmp/cookies.txt';
+            fs.writeFileSync(tempPath, cookieContent);
+            console.log(`✅ Decoded cookies to: ${tempPath}`);
+            return tempPath;
+        } catch (e) {
+            console.log('❌ Failed to decode COOKIES_BASE64:', e.message);
+        }
+    }
+    
+    console.log('⚠️  No cookies file found in any location');
     return null;
 }
 
 const COOKIES_PATH = findCookiesFile();
 const COOKIES_OPTION = COOKIES_PATH ? `--cookies "${COOKIES_PATH}"` : '';
 
-// Get download link using yt-dlp
+// ============================================================
+// MAIN SERVER LOGIC
+// ============================================================
+
 async function getDownloadLink(videoId, quality = 'best', type = 'video') {
     console.log(`🎬 Fetching: https://youtu.be/${videoId}`);
     console.log(`📌 Type: ${type}, Quality: ${quality}`);
     
     try {
-        // Build command with cookies
+        // Build command with cookies if available
         let command = `yt-dlp ${COOKIES_OPTION} -j --no-warnings --extractor-args "youtube:player_client=web" "https://youtu.be/${videoId}"`;
         console.log('📌 Running yt-dlp...');
         
