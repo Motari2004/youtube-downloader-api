@@ -1,12 +1,55 @@
 const express = require('express');
 const cors = require('cors');
 const { exec } = require('child_process');
+const fs = require('fs');
+const path = require('path');
 
 const app = express();
-const PORT = 3001;
+const PORT = process.env.PORT || 3001;
 
 app.use(cors());
 app.use(express.json());
+
+// ============================================================
+// COOKIES - Read from Secret Files
+// ============================================================
+
+function findCookiesFile() {
+    // Secret files are available at /etc/secrets/<filename>
+    const secretPath = '/etc/secrets/cookies.txt';
+    
+    if (fs.existsSync(secretPath)) {
+        console.log(`✅ Found cookies at: ${secretPath}`);
+        return secretPath;
+    }
+    
+    // Fallback paths (for local development)
+    const fallbackPaths = [
+        './cookies.txt',
+        path.join(__dirname, 'cookies.txt'),
+        path.join(process.cwd(), 'cookies.txt'),
+        '/tmp/cookies.txt'
+    ];
+    
+    for (const p of fallbackPaths) {
+        if (fs.existsSync(p)) {
+            console.log(`✅ Found cookies at: ${p}`);
+            return p;
+        }
+    }
+    
+    console.log('⚠️  No cookies file found');
+    console.log('📌 Add cookies.txt as a Secret File in Render:');
+    console.log('   1. Go to your service → Secrets tab');
+    console.log('   2. Click "Add Secret File"');
+    console.log('   3. Filename: cookies.txt');
+    console.log('   4. Paste your cookie content');
+    console.log('   5. Save and redeploy');
+    return null;
+}
+
+const COOKIES_PATH = findCookiesFile();
+const COOKIES_OPTION = COOKIES_PATH ? `--cookies "${COOKIES_PATH}"` : '';
 
 // Get download link using yt-dlp
 async function getDownloadLink(videoId, quality = 'best', type = 'video') {
@@ -14,13 +57,27 @@ async function getDownloadLink(videoId, quality = 'best', type = 'video') {
     console.log(`📌 Type: ${type}, Quality: ${quality}`);
     
     try {
-        const command = `yt-dlp -j --no-warnings "https://youtu.be/${videoId}"`;
+        // Build command with cookies
+        let command = `yt-dlp ${COOKIES_OPTION} -j --no-warnings --extractor-args "youtube:player_client=web" "https://youtu.be/${videoId}"`;
         console.log('📌 Running yt-dlp...');
         
         const result = await new Promise((resolve, reject) => {
             exec(command, { maxBuffer: 50 * 1024 * 1024 }, (error, stdout, stderr) => {
-                if (error) reject(new Error(error.message));
-                else resolve(stdout);
+                if (error) {
+                    // Fallback: try with android client
+                    const fallbackCommand = `yt-dlp ${COOKIES_OPTION} -j --no-warnings --extractor-args "youtube:player_client=android" "https://youtu.be/${videoId}"`;
+                    console.log(`🔄 Trying fallback: ${fallbackCommand}`);
+                    
+                    exec(fallbackCommand, { maxBuffer: 50 * 1024 * 1024 }, (err, out, errOut) => {
+                        if (err) {
+                            reject(new Error(errOut || err.message));
+                            return;
+                        }
+                        resolve(out);
+                    });
+                    return;
+                }
+                resolve(stdout);
             });
         });
         
@@ -35,13 +92,11 @@ async function getDownloadLink(videoId, quality = 'best', type = 'video') {
         if (type === 'audio') {
             console.log('🎵 Looking for audio-only formats...');
             
-            // Get audio-only formats
             const audioFormats = formats.filter(f => 
                 (!f.vcodec || f.vcodec === 'none') && 
                 f.acodec && f.acodec !== 'none'
             );
             
-            // Sort by bitrate (highest first)
             audioFormats.sort((a, b) => {
                 const bitrateA = parseInt(a.abr) || 0;
                 const bitrateB = parseInt(b.abr) || 0;
@@ -53,11 +108,9 @@ async function getDownloadLink(videoId, quality = 'best', type = 'video') {
                 console.log(`   - ${f.ext} (${f.abr || '?'}kbps): ${formatSize(f.filesize || 0)}`);
             });
             
-            // Select best audio format
             let selectedAudio = null;
             let bitrateLabel = '128kbps';
             
-            // Priority: m4a > mp4 > webm
             if (quality === 'best' || quality === 'default') {
                 selectedAudio = audioFormats.find(f => f.ext === 'm4a' && parseInt(f.abr) >= 128) ||
                                audioFormats.find(f => f.ext === 'm4a') ||
@@ -179,7 +232,10 @@ function formatSize(bytes) {
     return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
 }
 
-// API endpoints
+// ============================================================
+// API ENDPOINTS
+// ============================================================
+
 app.post('/api/download', async (req, res) => {
     const { videoId, quality = 'best', type = 'video' } = req.body;
     
@@ -199,10 +255,10 @@ app.post('/api/info', async (req, res) => {
     }
     
     try {
-        const command = `yt-dlp -j --no-warnings "https://youtu.be/${videoId}"`;
+        const command = `yt-dlp ${COOKIES_OPTION} -j --no-warnings "https://youtu.be/${videoId}"`;
         const result = await new Promise((resolve, reject) => {
             exec(command, { maxBuffer: 50 * 1024 * 1024 }, (error, stdout, stderr) => {
-                if (error) reject(new Error(error.message));
+                if (error) reject(new Error(stderr || error.message));
                 else resolve(stdout);
             });
         });
@@ -210,7 +266,6 @@ app.post('/api/info', async (req, res) => {
         const videoInfo = JSON.parse(result);
         const formats = videoInfo.formats || [];
         
-        // Get video qualities
         const videoFormats = formats.filter(f => 
             f.vcodec && f.vcodec !== 'none' && 
             f.acodec && f.acodec !== 'none'
@@ -232,7 +287,6 @@ app.post('/api/info', async (req, res) => {
         }
         qualities.sort((a, b) => b.height - a.height);
         
-        // Get audio formats
         const audioFormats = formats.filter(f => 
             (!f.vcodec || f.vcodec === 'none') && 
             f.acodec && f.acodec !== 'none'
@@ -260,12 +314,20 @@ app.post('/api/info', async (req, res) => {
 });
 
 app.get('/api/check', (req, res) => {
-    exec('yt-dlp --version', (error, stdout) => {
-        if (error) {
-            res.json({ installed: false, message: 'yt-dlp not installed' });
-        } else {
-            res.json({ installed: true, message: 'yt-dlp is installed', version: stdout.trim() });
+    const checks = {
+        cookies: {
+            exists: COOKIES_PATH !== null,
+            path: COOKIES_PATH,
+            source: 'Secret File'
         }
+    };
+    
+    exec('yt-dlp --version', (error, stdout) => {
+        checks.ytDlp = {
+            installed: !error,
+            version: error ? null : stdout.trim()
+        };
+        res.json(checks);
     });
 });
 
@@ -273,17 +335,25 @@ app.get('/api/health', (req, res) => {
     res.json({
         status: 'running',
         mode: 'yt-dlp backend',
+        cookies: COOKIES_PATH ? '✅ Present' : '❌ Missing',
+        cookieSource: COOKIES_PATH ? 'Secret File' : 'None',
         timestamp: new Date().toISOString()
     });
 });
+
+// ============================================================
+// START SERVER
+// ============================================================
 
 app.listen(PORT, () => {
     console.log(`🚀 Server running at http://localhost:${PORT}`);
     console.log(`📌 POST /api/download - Download video/audio`);
     console.log(`📌 POST /api/info     - Get video info`);
-    console.log(`📌 GET  /api/check   - Check yt-dlp`);
+    console.log(`📌 GET  /api/check   - Check dependencies`);
     console.log(`📌 GET  /api/health  - Health check`);
     console.log('');
+    console.log(`🍪 Cookies: ${COOKIES_PATH ? '✅ Found' : '❌ Not found'}`);
+    console.log(`📌 Cookie Source: ${COOKIES_PATH ? 'Secret File' : 'None'}`);
     console.log('⚡ Using yt-dlp backend');
     console.log('📌 Video: MP4 with best quality');
     console.log('📌 Audio: MP3 format');
