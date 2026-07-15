@@ -11,32 +11,42 @@ app.use(cors());
 app.use(express.json());
 
 // ============================================================
-// COOKIES - Check ALL possible locations
+// COOKIES - Copy from read-only to writable location
 // ============================================================
 
-function findCookiesFile() {
-    // All possible locations where cookies could be
-    const possiblePaths = [
-        // Render Secret Files location
-        '/etc/secrets/cookies.txt',
-        // Current directory
+function setupCookies() {
+    // Check if cookies exist in /etc/secrets (read-only)
+    const secretPath = '/etc/secrets/cookies.txt';
+    const writablePath = '/tmp/cookies.txt';
+    
+    // First, try to read from secret
+    if (fs.existsSync(secretPath)) {
+        try {
+            console.log(`📌 Found cookies at: ${secretPath}`);
+            // Copy to writable location
+            const cookieContent = fs.readFileSync(secretPath, 'utf8');
+            fs.writeFileSync(writablePath, cookieContent);
+            console.log(`✅ Cookies copied to writable location: ${writablePath}`);
+            return writablePath;
+        } catch (error) {
+            console.log(`❌ Failed to copy cookies: ${error.message}`);
+        }
+    }
+    
+    // Check if cookies already exist in /tmp (from previous copy)
+    if (fs.existsSync(writablePath)) {
+        console.log(`✅ Found cookies at: ${writablePath}`);
+        return writablePath;
+    }
+    
+    // Check if cookies exist in current directory (for local dev)
+    const localPaths = [
         './cookies.txt',
         path.join(__dirname, 'cookies.txt'),
-        path.join(process.cwd(), 'cookies.txt'),
-        // Render root
-        '/opt/render/project/src/cookies.txt',
-        // /tmp directory
-        '/tmp/cookies.txt',
-        // User home
-        process.env.HOME ? path.join(process.env.HOME, 'cookies.txt') : null,
-        // Render secrets alternative
-        '/secrets/cookies.txt'
-    ].filter(Boolean); // Remove null values
+        path.join(process.cwd(), 'cookies.txt')
+    ];
     
-    // Log all paths we're checking
-    console.log('🔍 Checking for cookies at:');
-    for (const p of possiblePaths) {
-        console.log(`   ${p}`);
+    for (const p of localPaths) {
         if (fs.existsSync(p)) {
             console.log(`✅ Found cookies at: ${p}`);
             return p;
@@ -50,20 +60,19 @@ function findCookiesFile() {
             console.log('📌 Found COOKIES_BASE64 env variable, decoding...');
             const cookieBuffer = Buffer.from(cookiesBase64, 'base64');
             const cookieContent = cookieBuffer.toString('utf8');
-            const tempPath = '/tmp/cookies.txt';
-            fs.writeFileSync(tempPath, cookieContent);
-            console.log(`✅ Decoded cookies to: ${tempPath}`);
-            return tempPath;
+            fs.writeFileSync(writablePath, cookieContent);
+            console.log(`✅ Decoded cookies to: ${writablePath}`);
+            return writablePath;
         } catch (e) {
             console.log('❌ Failed to decode COOKIES_BASE64:', e.message);
         }
     }
     
-    console.log('⚠️  No cookies file found in any location');
+    console.log('⚠️  No cookies file found');
     return null;
 }
 
-const COOKIES_PATH = findCookiesFile();
+const COOKIES_PATH = setupCookies();
 const COOKIES_OPTION = COOKIES_PATH ? `--cookies "${COOKIES_PATH}"` : '';
 
 // ============================================================
@@ -75,7 +84,7 @@ async function getDownloadLink(videoId, quality = 'best', type = 'video') {
     console.log(`📌 Type: ${type}, Quality: ${quality}`);
     
     try {
-        // Build command with cookies if available
+        // Build command with cookies from writable location
         let command = `yt-dlp ${COOKIES_OPTION} -j --no-warnings --extractor-args "youtube:player_client=web" "https://youtu.be/${videoId}"`;
         console.log('📌 Running yt-dlp...');
         
@@ -336,7 +345,7 @@ app.get('/api/check', (req, res) => {
         cookies: {
             exists: COOKIES_PATH !== null,
             path: COOKIES_PATH,
-            source: 'Secret File'
+            source: 'Secret File (copied to /tmp)'
         }
     };
     
@@ -354,7 +363,7 @@ app.get('/api/health', (req, res) => {
         status: 'running',
         mode: 'yt-dlp backend',
         cookies: COOKIES_PATH ? '✅ Present' : '❌ Missing',
-        cookieSource: COOKIES_PATH ? 'Secret File' : 'None',
+        cookieSource: COOKIES_PATH ? 'Secret File (copied to /tmp)' : 'None',
         timestamp: new Date().toISOString()
     });
 });
@@ -371,7 +380,7 @@ app.listen(PORT, () => {
     console.log(`📌 GET  /api/health  - Health check`);
     console.log('');
     console.log(`🍪 Cookies: ${COOKIES_PATH ? '✅ Found' : '❌ Not found'}`);
-    console.log(`📌 Cookie Source: ${COOKIES_PATH ? 'Secret File' : 'None'}`);
+    console.log(`📌 Cookie Source: ${COOKIES_PATH ? 'Secret File (copied to /tmp)' : 'None'}`);
     console.log('⚡ Using yt-dlp backend');
     console.log('📌 Video: MP4 with best quality');
     console.log('📌 Audio: MP3 format');
