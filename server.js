@@ -40,58 +40,138 @@ const QUALITY_MAP = {
 };
 
 // ============================================================
-// CHECK PLAYWRIGHT BROWSER PATH
-// ============================================================
-
-function getPlaywrightBrowserPath() {
-    const home = process.env.HOME || '/opt/render';
-    const possiblePaths = [
-        path.join(home, '.cache', 'ms-playwright'),
-        path.join(process.cwd(), 'node_modules', '.cache', 'ms-playwright'),
-        '/opt/render/.cache/ms-playwright'
-    ];
-    
-    for (const p of possiblePaths) {
-        if (fs.existsSync(p)) {
-            console.log(`✅ Found Playwright cache: ${p}`);
-            return p;
-        }
-    }
-    
-    console.log('⚠️  Playwright cache not found');
-    return null;
-}
-
-// ============================================================
-// FIND INPUT FIELD - VIDSSAVE
+// FIND INPUT FIELD - MULTIPLE SELECTORS
 // ============================================================
 
 async function findInputField(page) {
     console.log('📌 Waiting for input field...');
     
-    try {
-        const input = await page.waitForSelector('#url-input-wrapper', { 
-            timeout: 10000 
-        });
-        if (input) {
-            console.log('✅ Found input by #url-input-wrapper');
-            return input;
+    // Wait for page to stabilize
+    await page.waitForTimeout(2000);
+    
+    // Multiple selectors for input field
+    const selectors = [
+        '#url-input-wrapper',
+        'input[type="text"]',
+        'input[placeholder*="Paste"]',
+        'input[placeholder*="paste"]',
+        'input[placeholder*="YouTube"]',
+        'input[placeholder*="link"]',
+        'input[class*="url"]',
+        'input[class*="input"]',
+        'input[name="url"]',
+        'input[name="link"]',
+        '#url-input',
+        '#search-input',
+        '.url-input',
+        '.search-input'
+    ];
+    
+    for (const selector of selectors) {
+        try {
+            const input = await page.waitForSelector(selector, { 
+                timeout: 3000 
+            });
+            if (input) {
+                console.log(`✅ Found input by: ${selector}`);
+                return input;
+            }
+        } catch (e) {
+            // Continue to next selector
         }
-    } catch (e) {
-        console.log('⚠️  #url-input-wrapper not found');
     }
     
+    // Try to find any visible input
     try {
-        const input = await page.waitForSelector('input[type="text"]', { 
-            timeout: 5000 
-        });
-        if (input) {
-            console.log('✅ Found input by type');
-            return input;
+        const inputs = await page.$$('input');
+        for (const input of inputs) {
+            const isVisible = await input.isVisible();
+            if (isVisible) {
+                const type = await input.getAttribute('type');
+                if (type === 'text' || type === 'url' || !type) {
+                    console.log('✅ Found visible text input');
+                    return input;
+                }
+            }
         }
     } catch (e) {}
     
     console.log('❌ All input selectors failed');
+    return null;
+}
+
+// ============================================================
+// FIND DOWNLOAD ICON - MULTIPLE SELECTORS
+// ============================================================
+
+async function findDownloadIcon(page) {
+    console.log('📌 Looking for download icon...');
+    
+    const selectors = [
+        '[alt="download icon"]',
+        'img[alt*="download"]',
+        'img[src*="download"]',
+        '.download-icon',
+        '[class*="download-icon"]',
+        'button[class*="download"]',
+        'a[class*="download"]'
+    ];
+    
+    for (const selector of selectors) {
+        try {
+            const icon = await page.$(selector);
+            if (icon) {
+                console.log(`✅ Found download icon by: ${selector}`);
+                return icon;
+            }
+        } catch (e) {}
+    }
+    
+    console.log('⚠️  Download icon not found');
+    return null;
+}
+
+// ============================================================
+// FIND DOWNLOAD BUTTON - MULTIPLE SELECTORS
+// ============================================================
+
+async function findDownloadButton(page) {
+    console.log('📌 Looking for download button...');
+    
+    const selectors = [
+        'span.text-\\[0\\.28rem\\].text-\\[var\\(--brand-primary\\)\\].md\\:text-\\[18px\\]',
+        'text=Download',
+        'button:has-text("Download")',
+        'a:has-text("Download")',
+        '.download-btn',
+        '.btn-download',
+        'button[class*="download"]',
+        'a[class*="download"]'
+    ];
+    
+    for (const selector of selectors) {
+        try {
+            const btn = await page.$(selector);
+            if (btn) {
+                console.log(`✅ Found download button by: ${selector}`);
+                return btn;
+            }
+        } catch (e) {}
+    }
+    
+    // Try to find any button with Download text
+    try {
+        const btns = await page.$$('button, a');
+        for (const btn of btns) {
+            const text = await btn.textContent();
+            if (text && text.toLowerCase().includes('download')) {
+                console.log('✅ Found download button by text');
+                return btn;
+            }
+        }
+    } catch (e) {}
+    
+    console.log('⚠️  Download button not found');
     return null;
 }
 
@@ -190,23 +270,13 @@ async function saveFile(url, filename) {
 
 async function waitForElementsToLoad(page) {
     console.log('⏳ Waiting for page to fully load...');
-    await page.waitForTimeout(2000);
+    await page.waitForTimeout(3000);
     
     try {
         await page.waitForLoadState('networkidle', { timeout: 5000 });
         console.log('✅ Network idle');
     } catch (e) {
         console.log('⚠️  Network not idle, continuing...');
-    }
-    
-    try {
-        await page.waitForSelector('.loading, .spinner, .loader', { 
-            state: 'hidden', 
-            timeout: 5000 
-        });
-        console.log('✅ Loading spinners gone');
-    } catch (e) {
-        console.log('⚠️  No loading spinners found');
     }
     
     console.log('✅ Page is ready');
@@ -295,15 +365,12 @@ async function getDownloadUrl(videoId, quality = '720p') {
         // ============================================================
         // STEP 3: CLICK DOWNLOAD ICON
         // ============================================================
-        console.log('📌 Clicking download icon...');
-        await page.waitForTimeout(2000);
-        
-        const downloadIcon = await page.$('[alt="download icon"]');
+        const downloadIcon = await findDownloadIcon(page);
         if (downloadIcon) {
             await downloadIcon.click();
             console.log('✅ Download icon clicked!');
         } else {
-            console.log('⚠️  Download icon not found');
+            console.log('⚠️  Download icon not found, continuing...');
         }
         
         // ============================================================
@@ -314,7 +381,7 @@ async function getDownloadUrl(videoId, quality = '720p') {
         
         console.log('📌 Waiting for quality options...');
         try {
-            await page.waitForSelector('.download-option, button[data-testid="format-pill"]', { 
+            await page.waitForSelector('.download-option, button[data-testid="format-pill"], .quality-option', { 
                 timeout: 15000 
             });
             console.log('✅ Quality options found');
@@ -373,49 +440,24 @@ async function getDownloadUrl(videoId, quality = '720p') {
         // ============================================================
         // STEP 7: CLICK DOWNLOAD
         // ============================================================
-        console.log('📌 Clicking Download...');
-        await page.waitForTimeout(2000);
-        
-        const downloadSelectors = [
-            'span.text-\\[0\\.28rem\\].text-\\[var\\(--brand-primary\\)\\].md\\:text-\\[18px\\]',
-            'text=Download',
-            'button:has-text("Download")',
-            'a:has-text("Download")',
-            '.download-btn'
-        ];
-        
-        let downloadClicked = false;
-        for (const selector of downloadSelectors) {
-            try {
-                const btn = await page.$(selector);
-                if (btn) {
-                    await Promise.all([
-                        page.waitForResponse(
-                            response => response.url().includes('vidssave.com/download') || 
-                                       response.url().includes('.mp4'),
-                            { timeout: 15000 }
-                        ).then(response => {
-                            if (response && !capturedUrl) {
-                                capturedUrl = response.url();
-                                console.log(`✅ Download URL captured from network!`);
-                            }
-                        }).catch(() => {}),
-                        btn.click()
-                    ]);
-                    
-                    console.log(`✅ Download clicked`);
-                    downloadClicked = true;
-                    break;
-                }
-            } catch (e) {}
-        }
-        
-        if (!downloadClicked) {
-            const btn = page.getByText('Download', { exact: false });
-            if (await btn.isVisible()) {
-                await btn.click();
-                console.log('✅ Download clicked by text');
-            }
+        const downloadBtn = await findDownloadButton(page);
+        if (downloadBtn) {
+            await Promise.all([
+                page.waitForResponse(
+                    response => response.url().includes('vidssave.com/download') || 
+                               response.url().includes('.mp4'),
+                    { timeout: 15000 }
+                ).then(response => {
+                    if (response && !capturedUrl) {
+                        capturedUrl = response.url();
+                        console.log(`✅ Download URL captured from network!`);
+                    }
+                }).catch(() => {}),
+                downloadBtn.click()
+            ]);
+            console.log('✅ Download clicked');
+        } else {
+            console.log('⚠️  Download button not found');
         }
         
         // ============================================================
