@@ -47,36 +47,38 @@ const QUALITY_MAP = {
 };
 
 // ============================================================
-// FIND INPUT FIELD - YTDOWN.TO (MULTIPLE METHODS)
+// FIND INPUT FIELD - Y2MATE
 // ============================================================
 
 async function findInputField(page, videoId) {
-    console.log('📌 Looking for input field...');
+    console.log('📌 Looking for input field on Y2mate...');
     
     // Wait for page to stabilize
     await page.waitForTimeout(3000);
     
-    // Take screenshot of the page
+    // Take screenshot for debugging
     try {
-        const screenshotPath = path.join(SCREENSHOT_DIR, `${videoId}_page.png`);
+        const screenshotPath = path.join(SCREENSHOT_DIR, `${videoId}_y2mate_page.png`);
         await page.screenshot({ path: screenshotPath, fullPage: true });
         console.log(`📸 Screenshot saved: ${screenshotPath}`);
     } catch (e) {
         console.log('⚠️  Could not take screenshot');
     }
     
-    // Try all possible selectors
+    // Y2mate specific selectors
     const selectors = [
-        '#postUrl',
+        'input#txt-url',
         'input[type="text"]',
-        'input[placeholder*="Paste"]',
         'input[placeholder*="paste"]',
+        'input[placeholder*="Paste"]',
+        'input[placeholder*="keyword"]',
         'input[placeholder*="YouTube"]',
-        'input[placeholder*="link"]',
-        'input[class*="url"]',
+        'input[name="q"]',
         'input[name="url"]',
-        '.url-input',
-        '#url-input'
+        'input[class*="url"]',
+        '#url-input',
+        '.form-control',
+        'input[type="search"]'
     ];
     
     for (const selector of selectors) {
@@ -89,7 +91,7 @@ async function findInputField(page, videoId) {
         } catch (e) {}
     }
     
-    // Try by role (Playwright's built-in)
+    // Try by role
     try {
         const input = page.getByRole('textbox');
         if (await input.isVisible({ timeout: 3000 })) {
@@ -100,7 +102,7 @@ async function findInputField(page, videoId) {
     
     // Try by placeholder text
     try {
-        const input = page.getByPlaceholder('Paste your YouTube video link');
+        const input = page.getByPlaceholder(/paste|youtube|link|keyword/i);
         if (await input.isVisible({ timeout: 3000 })) {
             console.log('✅ Found input by placeholder');
             return input;
@@ -114,7 +116,7 @@ async function findInputField(page, videoId) {
             const isVisible = await input.isVisible();
             if (isVisible) {
                 const type = await input.getAttribute('type');
-                if (type === 'text' || type === 'url' || !type) {
+                if (type === 'text' || type === 'url' || type === 'search' || !type) {
                     console.log('✅ Found visible input');
                     return input;
                 }
@@ -124,7 +126,7 @@ async function findInputField(page, videoId) {
     
     // Save HTML for debugging
     try {
-        const htmlPath = path.join(SCREENSHOT_DIR, `${videoId}_page.html`);
+        const htmlPath = path.join(SCREENSHOT_DIR, `${videoId}_y2mate_page.html`);
         const html = await page.content();
         fs.writeFileSync(htmlPath, html);
         console.log(`📄 HTML saved: ${htmlPath}`);
@@ -156,8 +158,8 @@ async function saveFile(url, filename) {
         
         const request = protocol.get(url, {
             headers: {
-                'Referer': 'https://app.ytdown.to/',
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+                'Referer': 'https://v24.www-y2mate.com/',
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
             }
         }, (response) => {
             if (response.statusCode === 301 || response.statusCode === 302) {
@@ -210,7 +212,7 @@ async function saveFile(url, filename) {
 }
 
 // ============================================================
-// GET DOWNLOAD URL - YTDOWN.TO
+// GET DOWNLOAD URL - Y2MATE
 // ============================================================
 
 async function getDownloadUrl(videoId, quality = '720p') {
@@ -260,10 +262,10 @@ async function getDownloadUrl(videoId, quality = '720p') {
         const videoUrl = `https://youtu.be/${videoId}`;
         
         // ============================================================
-        // STEP 1: NAVIGATE TO YTDOWN.TO
+        // STEP 1: NAVIGATE TO Y2MATE
         // ============================================================
-        console.log('📌 Opening ytdown.to...');
-        await page.goto('https://app.ytdown.to/en35/', {
+        console.log('📌 Opening Y2mate...');
+        await page.goto('https://v24.www-y2mate.com/', {
             waitUntil: 'domcontentloaded',
             timeout: 60000
         });
@@ -277,7 +279,8 @@ async function getDownloadUrl(videoId, quality = '720p') {
         const inputField = await findInputField(page, videoId);
         
         if (inputField) {
-            await inputField.click();
+            // Clear and fill
+            await inputField.click({ clickCount: 3 });
             await inputField.fill(videoUrl);
             console.log('✅ URL entered');
         } else {
@@ -293,15 +296,38 @@ async function getDownloadUrl(videoId, quality = '720p') {
         }
         
         // ============================================================
-        // STEP 3: CLICK DOWNLOAD
+        // STEP 3: CLICK START/SEARCH
         // ============================================================
-        console.log('📌 Clicking Download...');
-        const downloadBtn = await page.$('.download-label');
-        if (downloadBtn) {
-            await downloadBtn.click();
-            console.log('✅ Download clicked!');
-        } else {
-            console.log('⚠️  Download button not found');
+        console.log('📌 Clicking Start/Convert...');
+        
+        // Try different button selectors
+        const buttonSelectors = [
+            'button[type="submit"]',
+            'button:has-text("Start")',
+            'button:has-text("Convert")',
+            'button:has-text("Download")',
+            'input[type="submit"]',
+            '.btn-start',
+            '.btn-primary',
+            '#btn-submit'
+        ];
+        
+        let startClicked = false;
+        for (const selector of buttonSelectors) {
+            try {
+                const btn = await page.$(selector);
+                if (btn && await btn.isVisible()) {
+                    await btn.click();
+                    console.log(`✅ Clicked: ${selector}`);
+                    startClicked = true;
+                    break;
+                }
+            } catch (e) {}
+        }
+        
+        if (!startClicked) {
+            console.log('⚠️  No start button found, pressing Enter...');
+            await page.keyboard.press('Enter');
         }
         
         // ============================================================
@@ -311,95 +337,103 @@ async function getDownloadUrl(videoId, quality = '720p') {
         await page.waitForTimeout(5000);
         
         // ============================================================
-        // STEP 5: SELECT QUALITY
+        // STEP 5: SELECT QUALITY & GET DOWNLOAD LINK
         // ============================================================
-        console.log(`📌 Looking for ${qualityText} quality...`);
+        console.log(`📌 Looking for ${qualityText} quality options...`);
         
-        const qualityOptions = await page.$$('.download-option');
-        console.log(`📊 Found ${qualityOptions.length} quality options`);
+        // Y2mate usually shows quality buttons like "720p", "1080p" etc.
+        const qualityLinks = await page.$$('a[download], a[href*="download"], .btn-download, .download-btn');
+        console.log(`📊 Found ${qualityLinks.length} download links`);
         
-        if (qualityOptions.length > 0) {
-            for (const opt of qualityOptions) {
-                const text = await opt.textContent();
-                console.log(`   - ${text}`);
-            }
+        if (qualityLinks.length > 0) {
+            // Look for quality in text or href
+            let targetLink = null;
+            let targetQuality = qualityText;
             
-            let qualitySelected = false;
-            for (const opt of qualityOptions) {
-                const text = await opt.textContent();
-                if (text && text.includes(qualityText)) {
-                    await opt.click();
-                    console.log(`✅ ${qualityText} selected!`);
-                    selectedQuality = qualityText;
-                    qualitySelected = true;
+            for (const link of qualityLinks) {
+                const text = await link.textContent();
+                const href = await link.getAttribute('href');
+                const combined = `${text} ${href || ''}`;
+                
+                console.log(`   - Checking: ${text}`);
+                
+                // Look for quality match (e.g., "720p", "1080p")
+                if (combined.includes(qualityText) || 
+                    (qualityText === '720p' && combined.includes('720')) ||
+                    (qualityText === '1080p' && combined.includes('1080'))) {
+                    targetLink = link;
+                    targetQuality = qualityText;
                     break;
                 }
             }
             
-            if (!qualitySelected) {
-                console.log(`⚠️  Using first available quality`);
-                await qualityOptions[0].click();
-                console.log(`✅ Used first available quality`);
+            // If no quality match, use first available
+            if (!targetLink) {
+                console.log(`⚠️  No ${qualityText} found, using first available`);
+                targetLink = qualityLinks[0];
+            }
+            
+            if (targetLink) {
+                // Get the download URL
+                const href = await targetLink.getAttribute('href');
+                if (href) {
+                    downloadUrl = href.startsWith('http') ? href : `https://v24.www-y2mate.com${href}`;
+                    console.log(`✅ Download link found: ${downloadUrl}`);
+                    selectedQuality = targetQuality;
+                } else {
+                    // Try clicking the link
+                    await targetLink.click();
+                    console.log('✅ Clicked download link');
+                }
             }
         } else {
-            console.log('⚠️  No quality options found');
+            // Try to find download links in the page
+            console.log('📌 Searching HTML for download links...');
+            const pageHtml = await page.content();
+            
+            // Look for download URLs
+            const downloadMatches = pageHtml.match(/https?:\/\/[^\s"']*\.(mp4|webm|3gp|avi)[^\s"']*/gi);
+            if (downloadMatches && downloadMatches.length > 0) {
+                downloadUrl = downloadMatches[0];
+                console.log(`✅ Found download URL in HTML: ${downloadUrl}`);
+            }
         }
         
         // ============================================================
-        // STEP 6: CLICK START
-        // ============================================================
-        console.log('📌 Clicking Start...');
-        await page.waitForTimeout(2000);
-        
-        const startBtn = await page.$('#downloadButton');
-        if (startBtn) {
-            await startBtn.click();
-            console.log('✅ Start clicked!');
-        } else {
-            console.log('⚠️  Start button not found');
-        }
-        
-        // ============================================================
-        // STEP 7: NETWORK INTERCEPTION
+        // STEP 6: NETWORK INTERCEPTION (for AJAX downloads)
         // ============================================================
         console.log('📌 Setting up network interception...');
         let capturedUrl = null;
         
         context.on('response', (response) => {
             const url = response.url();
-            if (url && (url.includes('.mp4') || url.includes('.webm') || url.includes('googlevideo'))) {
-                console.log(`🌐 Video URL captured`);
+            if (url && (url.includes('.mp4') || url.includes('.webm') || 
+                       url.includes('googlevideo') || url.includes('download'))) {
+                console.log(`🌐 Video URL captured: ${url.substring(0, 100)}...`);
                 capturedUrl = url;
             }
         });
         
         // ============================================================
-        // STEP 8: WAIT FOR DOWNLOAD
+        // STEP 7: WAIT FOR DOWNLOAD
         // ============================================================
         console.log('⏳ Waiting 10 seconds for download...');
         await page.waitForTimeout(10000);
         
         if (capturedUrl) {
             downloadUrl = capturedUrl;
-            console.log('✅ Download URL captured!');
+            console.log('✅ Download URL captured from network!');
         }
         
         // ============================================================
-        // STEP 9: FALLBACK - SEARCH HTML
+        // STEP 8: GET VIDEO TITLE
         // ============================================================
-        if (!downloadUrl) {
-            console.log('📌 Searching HTML for download URL...');
-            const pageHtml = await page.content();
-            const match = pageHtml.match(/https?:\/\/[^\s"']*\.(mp4|webm)[^\s"']*/);
-            if (match) {
-                downloadUrl = match[0];
-                console.log('✅ Found video URL in HTML');
-            }
-        }
-        
         videoTitle = await page.evaluate(() => {
-            const titleEl = document.querySelector('h1, .title, [class*="title"]');
-            return titleEl ? titleEl.textContent.trim().replace(/[^a-zA-Z0-9]/g, '_') : 'video';
+            const titleEl = document.querySelector('h1, .title, [class*="title"], .video-title, .filename');
+            if (titleEl) {
+                return titleEl.textContent.trim().replace(/[^a-zA-Z0-9]/g, '_').substring(0, 50);
+            }
+            return 'youtube_video';
         });
         
         console.log(`📊 Video title: ${videoTitle}`);
@@ -420,7 +454,8 @@ async function getDownloadUrl(videoId, quality = '720p') {
         title: videoTitle || 'video',
         quality: quality,
         videoId: videoId,
-        selectedQuality: selectedQuality
+        selectedQuality: selectedQuality,
+        service: 'Y2mate'
     };
 }
 
@@ -448,6 +483,7 @@ app.post('/api/download', async (req, res) => {
                 result.savedTo = DOWNLOAD_DIR;
             } catch (downloadError) {
                 console.error('❌ Error saving file:', downloadError.message);
+                result.saveError = downloadError.message;
             }
         }
         
@@ -464,7 +500,7 @@ app.post('/api/download', async (req, res) => {
 app.get('/api/health', (req, res) => {
     res.json({
         status: 'running',
-        mode: 'YTDownload.to',
+        mode: 'Y2mate',
         downloadDir: DOWNLOAD_DIR,
         screenshotDir: SCREENSHOT_DIR,
         environment: process.env.RENDER ? 'render' : 'local',
