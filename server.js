@@ -3,6 +3,7 @@ const cors = require('cors');
 const { chromium } = require('playwright');
 const fs = require('fs');
 const path = require('path');
+const axios = require('axios');
 
 const app = express();
 const PORT = process.env.PORT || 3003;
@@ -11,25 +12,25 @@ app.use(cors());
 app.use(express.json());
 
 // ============================================================
-// DOWNLOAD LOCATION - Render uses /tmp for ephemeral storage
+// TEMP LOCATION - Only for temporary storage during processing
 // ============================================================
 
-const DOWNLOAD_DIR = process.env.RENDER 
+const TEMP_DIR = process.env.RENDER 
     ? '/tmp/downloads' 
-    : path.join(__dirname, 'downloads');
+    : path.join(__dirname, 'temp');
 
 const SCREENSHOT_DIR = process.env.RENDER 
     ? '/tmp/screenshots' 
     : path.join(__dirname, 'screenshots');
 
-if (!fs.existsSync(DOWNLOAD_DIR)) {
-    fs.mkdirSync(DOWNLOAD_DIR, { recursive: true });
+if (!fs.existsSync(TEMP_DIR)) {
+    fs.mkdirSync(TEMP_DIR, { recursive: true });
 }
 if (!fs.existsSync(SCREENSHOT_DIR)) {
     fs.mkdirSync(SCREENSHOT_DIR, { recursive: true });
 }
 
-console.log(`📁 Downloads: ${DOWNLOAD_DIR}`);
+console.log(`📁 Temp directory: ${TEMP_DIR}`);
 console.log(`📸 Screenshots: ${SCREENSHOT_DIR}`);
 
 // ============================================================
@@ -45,14 +46,13 @@ const QUALITY_MAP = {
 };
 
 // ============================================================
-// GET DOWNLOAD URL - ZEEMO.TO (HEADLESS FOR RENDER)
+// GET DOWNLOAD URL - ZEEMO.TO
 // ============================================================
 
 async function getDownloadUrl(videoId, quality = '720p') {
     console.log(`🎬 Getting download URL for video: ${videoId}`);
     console.log(`📌 Quality: ${quality}`);
     console.log(`🔗 Using: Zeemo.to`);
-    console.log(`👁️  Browser mode: HEADLESS (Render)`);
     
     const qualityText = QUALITY_MAP[quality] || '720p';
     
@@ -60,10 +60,10 @@ async function getDownloadUrl(videoId, quality = '720p') {
     let context;
     
     try {
-        console.log('🚀 Launching browser (headless)...');
+        console.log('🚀 Launching browser...');
         
         browser = await chromium.launch({
-            headless: true,  // 👈 HEADLESS FOR RENDER
+            headless: true,
             slowMo: 50,
             args: [
                 '--no-sandbox',
@@ -122,15 +122,6 @@ async function getDownloadUrl(videoId, quality = '720p') {
         console.log('✅ Page loaded');
         await page.waitForTimeout(3000);
         
-        // Save screenshot for debugging
-        try {
-            const screenshotPath = path.join(SCREENSHOT_DIR, `${videoId}_zeemo_page.png`);
-            await page.screenshot({ path: screenshotPath, fullPage: true });
-            console.log(`📸 Screenshot saved: ${screenshotPath}`);
-        } catch (e) {
-            console.log('⚠️  Could not save screenshot');
-        }
-        
         // ============================================================
         // STEP 2: FIND INPUT FIELD
         // ============================================================
@@ -185,19 +176,6 @@ async function getDownloadUrl(videoId, quality = '720p') {
                         break;
                     }
                 } catch (e) {}
-            }
-        }
-        
-        if (!inputField) {
-            try {
-                inputField = page.locator('#app input');
-                if (await inputField.isVisible({ timeout: 3000 })) {
-                    console.log('✅ Found input by: #app input');
-                } else {
-                    inputField = null;
-                }
-            } catch (e) {
-                console.log('⚠️  Method 4 failed:', e.message);
             }
         }
         
@@ -328,9 +306,6 @@ async function getDownloadUrl(videoId, quality = '720p') {
             console.log('⚠️  No "Download" button found, continuing...');
         }
         
-        // ============================================================
-        // ⏰ WAIT 5 SECONDS
-        // ============================================================
         console.log('⏳ WAITING 5 seconds for "Download video" button to appear...');
         await page.waitForTimeout(5000);
         
@@ -373,14 +348,11 @@ async function getDownloadUrl(videoId, quality = '720p') {
             console.log('⚠️  No "Download video" button found!');
         }
         
-        // ============================================================
-        // STEP 9: WAIT FOR NETWORK RESPONSE
-        // ============================================================
         console.log('⏳ WAITING 10 seconds for network response...');
         await page.waitForTimeout(10000);
         
         // ============================================================
-        // STEP 10: GET VIDEO URL
+        // STEP 9: GET VIDEO URL
         // ============================================================
         let downloadUrl = null;
         let selectedQuality = qualityText;
@@ -398,18 +370,10 @@ async function getDownloadUrl(videoId, quality = '720p') {
                 downloadUrl = sfMatches[0];
                 console.log(`✅ Found sf-converter URL in HTML: ${downloadUrl.substring(0, 80)}...`);
             }
-            
-            if (!downloadUrl) {
-                const mp4Matches = pageHtml.match(/https?:\/\/[^\s"']*\.mp4[^\s"']*/gi);
-                if (mp4Matches && mp4Matches.length > 0) {
-                    downloadUrl = mp4Matches[0];
-                    console.log(`✅ Found MP4 URL in HTML: ${downloadUrl.substring(0, 80)}...`);
-                }
-            }
         }
         
         // ============================================================
-        // STEP 11: GET VIDEO TITLE
+        // STEP 10: GET VIDEO TITLE
         // ============================================================
         let videoTitle = await page.evaluate(() => {
             const titleEl = document.querySelector('h1, .title, [class*="title"], .video-title, .filename');
@@ -444,78 +408,66 @@ async function getDownloadUrl(videoId, quality = '720p') {
 }
 
 // ============================================================
-// SAVE FILE
+// STREAM FILE DIRECTLY TO CLIENT (NO SAVING ON SERVER)
 // ============================================================
 
-async function saveFile(url, filename) {
-    return new Promise((resolve, reject) => {
-        const filePath = path.join(DOWNLOAD_DIR, filename);
-        console.log(`📥 Saving to: ${filePath}`);
+async function streamFile(url, filename, res) {
+    console.log(`📥 Streaming file to client: ${filename}`);
+    
+    if (!url) {
+        res.status(400).json({ error: 'No URL provided' });
+        return;
+    }
+    
+    try {
+        // Set headers for file download
+        res.setHeader('Content-Disposition', `attachment; filename="${encodeURIComponent(filename)}"`);
+        res.setHeader('Content-Type', 'video/mp4');
         
-        if (!url) {
-            reject(new Error('No URL provided'));
-            return;
-        }
-        
-        const file = fs.createWriteStream(filePath);
-        let downloaded = 0;
-        let total = 0;
-        
-        const protocol = url.startsWith('https') ? require('https') : require('http');
-        
-        const request = protocol.get(url, {
+        // Stream the file directly from the source to the client
+        const response = await axios({
+            method: 'GET',
+            url: url,
+            responseType: 'stream',
             headers: {
                 'Referer': 'https://zeemo.to/',
                 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
-            }
-        }, (response) => {
-            if (response.statusCode === 301 || response.statusCode === 302) {
-                console.log(`🔄 Redirecting...`);
-                saveFile(response.headers.location, filename).then(resolve).catch(reject);
-                return;
-            }
-            
-            if (response.statusCode !== 200) {
-                reject(new Error(`HTTP ${response.statusCode}`));
-                return;
-            }
-            
-            total = parseInt(response.headers['content-length']) || 0;
-            console.log(`📊 File size: ${(total / 1024 / 1024).toFixed(2)} MB`);
-            
-            response.on('data', (chunk) => {
-                downloaded += chunk.length;
-                const percent = total ? (downloaded / total * 100).toFixed(1) : '?';
-                process.stdout.write(`\r   Downloading: ${percent}% (${(downloaded / 1024 / 1024).toFixed(2)} MB)`);
-            });
-            
-            response.pipe(file);
-            
-            file.on('finish', () => {
-                file.close();
-                console.log('');
-                console.log(`✅ Download complete: ${filename}`);
-                console.log(`📁 Saved to: ${filePath}`);
-                console.log(`📊 Size: ${(downloaded / 1024 / 1024).toFixed(2)} MB`);
-                resolve({ success: true, filePath, size: downloaded });
-            });
-            
-            file.on('error', (err) => {
-                console.log('');
-                reject(err);
-            });
+            },
+            timeout: 120000
         });
         
-        request.on('error', (err) => {
+        // Pipe the stream directly to the response
+        response.data.pipe(res);
+        
+        // Log progress
+        let downloaded = 0;
+        const total = parseInt(response.headers['content-length']) || 0;
+        console.log(`📊 File size: ${(total / 1024 / 1024).toFixed(2)} MB`);
+        
+        response.data.on('data', (chunk) => {
+            downloaded += chunk.length;
+            const percent = total ? (downloaded / total * 100).toFixed(1) : '?';
+            process.stdout.write(`\r   Streaming: ${percent}% (${(downloaded / 1024 / 1024).toFixed(2)} MB)`);
+        });
+        
+        response.data.on('end', () => {
             console.log('');
-            reject(err);
+            console.log(`✅ Stream complete: ${filename}`);
         });
         
-        request.setTimeout(120000, () => {
-            request.destroy();
-            reject(new Error('Download timeout'));
+        response.data.on('error', (err) => {
+            console.error('❌ Stream error:', err.message);
+            if (!res.headersSent) {
+                res.status(500).json({ error: err.message });
+            }
         });
-    });
+        
+    } catch (error) {
+        console.error('❌ Error streaming file:', error.message);
+        if (!res.headersSent) {
+            res.status(500).json({ error: error.message });
+        }
+    }
 }
 
 // ============================================================
@@ -530,57 +482,41 @@ app.post('/api/download', async (req, res) => {
     }
     
     try {
+        // Get the download URL
         const result = await getDownloadUrl(videoId, quality);
         
-        if (result.success && result.downloadUrl) {
-            const filename = `${result.title}_${result.quality}_${videoId}.mp4`;
-            console.log(`📥 Downloading file to: ${DOWNLOAD_DIR}`);
-            
-            try {
-                const saveResult = await saveFile(result.downloadUrl, filename);
-                result.filePath = saveResult.filePath;
-                result.savedTo = DOWNLOAD_DIR;
-                result.size = saveResult.size;
-            } catch (downloadError) {
-                console.error('❌ Error saving file:', downloadError.message);
-                result.saveError = downloadError.message;
-            }
+        if (!result.success || !result.downloadUrl) {
+            return res.status(404).json({ 
+                success: false, 
+                error: result.error || 'Could not get download URL' 
+            });
         }
         
-        res.json(result);
+        // Stream the file directly to the client
+        const filename = `${result.title}_${result.quality}_${videoId}.mp4`;
+        await streamFile(result.downloadUrl, filename, res);
+        
     } catch (error) {
         console.error('Error:', error.message);
-        res.status(500).json({ 
-            success: false, 
-            error: error.message 
-        });
+        if (!res.headersSent) {
+            res.status(500).json({ 
+                success: false, 
+                error: error.message 
+            });
+        }
     }
 });
 
 app.get('/api/health', (req, res) => {
     res.json({
         status: 'running',
-        mode: 'Zeemo',
-        downloadDir: DOWNLOAD_DIR,
+        mode: 'Zeemo (streaming)',
+        tempDir: TEMP_DIR,
         screenshotDir: SCREENSHOT_DIR,
         environment: process.env.RENDER ? 'render' : 'local',
         browserMode: 'headless',
         timestamp: new Date().toISOString()
     });
-});
-
-app.get('/api/files', (req, res) => {
-    try {
-        const files = fs.readdirSync(DOWNLOAD_DIR);
-        res.json({
-            success: true,
-            files: files,
-            count: files.length,
-            directory: DOWNLOAD_DIR
-        });
-    } catch (error) {
-        res.status(500).json({ error: error.message });
-    }
 });
 
 app.get('/api/screenshots', (req, res) => {
@@ -612,12 +548,10 @@ app.listen(PORT, () => {
     console.log('');
     console.log('🚀 YouTube Downloader Server running at http://localhost:' + PORT);
     console.log('🔗 Using: Zeemo.to');
-    console.log('👁️  Browser mode: HEADLESS');
-    console.log('📌 POST /api/download - Download video');
+    console.log('📌 POST /api/download - Download video (streams to client)');
     console.log('📌 GET  /api/health  - Health check');
-    console.log('📌 GET  /api/files   - List downloaded files');
     console.log('📌 GET  /api/screenshots - List screenshots');
     console.log('');
-    console.log('📁 Download location: ' + DOWNLOAD_DIR);
+    console.log('📁 Temp directory: ' + TEMP_DIR);
     console.log('📸 Screenshot location: ' + SCREENSHOT_DIR);
 });
