@@ -18,168 +18,65 @@ const DOWNLOAD_DIR = process.env.RENDER
     ? '/tmp/downloads' 
     : path.join(__dirname, 'downloads');
 
-const SCREENSHOT_DIR = process.env.RENDER 
-    ? '/tmp/screenshots' 
-    : path.join(__dirname, 'screenshots');
-
 if (!fs.existsSync(DOWNLOAD_DIR)) {
     fs.mkdirSync(DOWNLOAD_DIR, { recursive: true });
 }
 
-if (!fs.existsSync(SCREENSHOT_DIR)) {
-    fs.mkdirSync(SCREENSHOT_DIR, { recursive: true });
-}
-
 console.log(`📁 Downloads will be saved to: ${DOWNLOAD_DIR}`);
-console.log(`📸 Screenshots will be saved to: ${SCREENSHOT_DIR}`);
 
 // ============================================================
 // QUALITY MAPPING
 // ============================================================
 
 const QUALITY_MAP = {
-    '1080p': '1080P',
-    '720p': '720P',
-    '480p': '480P',
-    '360p': '360P',
-    '240p': '240P',
-    '144p': '144P',
-    'best': '720P'
+    '1080p': '1080p',
+    '720p': '720p',
+    '480p': '480p',
+    '360p': '360p',
+    '240p': '240p',
+    '144p': '144p',
+    'best': '720p'
 };
 
 // ============================================================
-// FIND INPUT FIELD - MULTIPLE SELECTORS WITH SCREENSHOT
+// FIND INPUT FIELD - YTDOWN.TO
 // ============================================================
 
-async function findInputField(page, videoId) {
-    console.log('📌 Waiting for input field...');
+async function findInputField(page) {
+    console.log('📌 Looking for input field...');
     
+    // Wait for page to load
     await page.waitForTimeout(3000);
     
-    // Take screenshot of the page
-    const screenshotPath = path.join(SCREENSHOT_DIR, `${videoId}_page.png`);
-    await page.screenshot({ path: screenshotPath, fullPage: true });
-    console.log(`📸 Screenshot saved: ${screenshotPath}`);
-    
-    // Also get page HTML for debugging
-    const htmlPath = path.join(SCREENSHOT_DIR, `${videoId}_page.html`);
-    const htmlContent = await page.content();
-    fs.writeFileSync(htmlPath, htmlContent);
-    console.log(`📄 HTML saved: ${htmlPath}`);
-    
     const selectors = [
-        '#url-input-wrapper',
+        '#postUrl',
         'input[type="text"]',
         'input[placeholder*="Paste"]',
         'input[placeholder*="paste"]',
         'input[placeholder*="YouTube"]',
-        'input[placeholder*="link"]',
-        'input[class*="url"]',
-        'input[class*="input"]',
-        'input[name="url"]',
-        'input[name="link"]',
-        '#url-input',
-        '#search-input',
-        '.url-input',
-        '.search-input'
+        'input[placeholder*="link"]'
     ];
     
     for (const selector of selectors) {
         try {
-            const input = await page.waitForSelector(selector, { 
-                timeout: 3000 
-            });
-            if (input) {
+            const input = await page.$(selector);
+            if (input && await input.isVisible()) {
                 console.log(`✅ Found input by: ${selector}`);
-                // Take screenshot of the input found
-                const foundPath = path.join(SCREENSHOT_DIR, `${videoId}_input_found.png`);
-                await page.screenshot({ path: foundPath });
-                console.log(`📸 Input found screenshot: ${foundPath}`);
                 return input;
             }
         } catch (e) {}
     }
     
-    // Take screenshot of failure
-    const failPath = path.join(SCREENSHOT_DIR, `${videoId}_input_not_found.png`);
-    await page.screenshot({ path: failPath });
-    console.log(`📸 Input not found screenshot: ${failPath}`);
-    
-    console.log('❌ All input selectors failed');
-    return null;
-}
-
-// ============================================================
-// FIND DOWNLOAD ICON
-// ============================================================
-
-async function findDownloadIcon(page) {
-    console.log('📌 Looking for download icon...');
-    
-    const selectors = [
-        '[alt="download icon"]',
-        'img[alt*="download"]',
-        'img[src*="download"]',
-        '.download-icon',
-        '[class*="download-icon"]',
-        'button[class*="download"]',
-        'a[class*="download"]'
-    ];
-    
-    for (const selector of selectors) {
-        try {
-            const icon = await page.$(selector);
-            if (icon) {
-                console.log(`✅ Found download icon by: ${selector}`);
-                return icon;
-            }
-        } catch (e) {}
-    }
-    
-    console.log('⚠️  Download icon not found');
-    return null;
-}
-
-// ============================================================
-// FIND DOWNLOAD BUTTON
-// ============================================================
-
-async function findDownloadButton(page) {
-    console.log('📌 Looking for download button...');
-    
-    const selectors = [
-        'span.text-\\[0\\.28rem\\].text-\\[var\\(--brand-primary\\)\\].md\\:text-\\[18px\\]',
-        'text=Download',
-        'button:has-text("Download")',
-        'a:has-text("Download")',
-        '.download-btn',
-        '.btn-download',
-        'button[class*="download"]',
-        'a[class*="download"]'
-    ];
-    
-    for (const selector of selectors) {
-        try {
-            const btn = await page.$(selector);
-            if (btn) {
-                console.log(`✅ Found download button by: ${selector}`);
-                return btn;
-            }
-        } catch (e) {}
-    }
-    
+    // Try by role
     try {
-        const btns = await page.$$('button, a');
-        for (const btn of btns) {
-            const text = await btn.textContent();
-            if (text && text.toLowerCase().includes('download')) {
-                console.log('✅ Found download button by text');
-                return btn;
-            }
+        const input = page.getByRole('textbox', { name: 'Paste your YouTube video link' });
+        if (await input.isVisible({ timeout: 3000 })) {
+            console.log('✅ Found input by role');
+            return input;
         }
     } catch (e) {}
     
-    console.log('⚠️  Download button not found');
+    console.log('❌ Input field not found');
     return null;
 }
 
@@ -192,9 +89,8 @@ async function saveFile(url, filename) {
         const filePath = path.join(DOWNLOAD_DIR, filename);
         console.log(`📥 Saving to: ${filePath}`);
         
-        if (!url || (!url.includes('vidssave.com') && !url.includes('googlevideo.com') && !url.includes('.mp4'))) {
-            console.log('❌ URL is not a valid video URL');
-            reject(new Error('Invalid video URL'));
+        if (!url) {
+            reject(new Error('No URL provided'));
             return;
         }
         
@@ -206,26 +102,13 @@ async function saveFile(url, filename) {
         
         const request = protocol.get(url, {
             headers: {
-                'Referer': 'https://vidssave.com/',
+                'Referer': 'https://app.ytdown.to/',
                 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
             }
         }, (response) => {
             if (response.statusCode === 301 || response.statusCode === 302) {
                 console.log(`🔄 Redirecting...`);
                 saveFile(response.headers.location, filename).then(resolve).catch(reject);
-                return;
-            }
-            
-            const contentType = response.headers['content-type'] || '';
-            if (contentType.includes('text/html')) {
-                console.log('⚠️  Received HTML instead of video!');
-                reject(new Error('URL points to webpage, not video'));
-                return;
-            }
-            
-            if (response.statusCode === 403) {
-                console.log('⚠️  URL expired (403). Need to get fresh URL.');
-                reject(new Error('URL expired. Please try again.'));
                 return;
             }
             
@@ -273,14 +156,14 @@ async function saveFile(url, filename) {
 }
 
 // ============================================================
-// GET DOWNLOAD URL - WITH SCREENSHOTS
+// GET DOWNLOAD URL - YTDOWN.TO
 // ============================================================
 
 async function getDownloadUrl(videoId, quality = '720p') {
     console.log(`🎬 Getting download URL for video: ${videoId}`);
     console.log(`📌 Quality: ${quality}`);
     
-    const qualityText = QUALITY_MAP[quality] || '720P';
+    const qualityText = QUALITY_MAP[quality] || '720p';
     
     let context;
     try {
@@ -295,10 +178,7 @@ async function getDownloadUrl(videoId, quality = '720p') {
                     '--disable-dev-shm-usage',
                     '--disable-gpu',
                     '--disable-blink-features=AutomationControlled',
-                    '--disable-features=IsolateOrigins,site-per-process',
-                    '--disable-background-timer-throttling',
-                    '--disable-backgrounding-occluded-windows',
-                    '--disable-renderer-backgrounding'
+                    '--disable-features=IsolateOrigins,site-per-process'
                 ]
             }
         );
@@ -326,27 +206,21 @@ async function getDownloadUrl(videoId, quality = '720p') {
         const videoUrl = `https://youtu.be/${videoId}`;
         
         // ============================================================
-        // STEP 1: NAVIGATE TO VIDSSAVE
+        // STEP 1: NAVIGATE TO YTDOWN.TO
         // ============================================================
-        console.log('📌 Opening vidssave.com...');
-        await page.goto('https://vidssave.com/youtube-video-downloader-7gt', {
+        console.log('📌 Opening ytdown.to...');
+        await page.goto('https://app.ytdown.to/en35/', {
             waitUntil: 'domcontentloaded',
             timeout: 60000
         });
         
         console.log('✅ Page loaded');
-        
-        // Take screenshot of initial page
-        const initialScreenshot = path.join(SCREENSHOT_DIR, `${videoId}_initial.png`);
-        await page.screenshot({ path: initialScreenshot });
-        console.log(`📸 Initial screenshot: ${initialScreenshot}`);
-        
         await page.waitForTimeout(3000);
         
         // ============================================================
         // STEP 2: ENTER URL
         // ============================================================
-        const inputField = await findInputField(page, videoId);
+        const inputField = await findInputField(page);
         
         if (inputField) {
             await inputField.click();
@@ -358,123 +232,92 @@ async function getDownloadUrl(videoId, quality = '720p') {
         }
         
         // ============================================================
-        // STEP 3: CLICK DOWNLOAD ICON
+        // STEP 3: CLICK DOWNLOAD
         // ============================================================
-        const downloadIcon = await findDownloadIcon(page);
-        if (downloadIcon) {
-            await downloadIcon.click();
-            console.log('✅ Download icon clicked!');
+        console.log('📌 Clicking Download...');
+        const downloadBtn = await page.$('.download-label');
+        if (downloadBtn) {
+            await downloadBtn.click();
+            console.log('✅ Download clicked!');
         } else {
-            console.log('⚠️  Download icon not found, continuing...');
+            console.log('⚠️  Download button not found');
         }
-        
-        // Take screenshot after clicking
-        const afterClickScreenshot = path.join(SCREENSHOT_DIR, `${videoId}_after_click.png`);
-        await page.screenshot({ path: afterClickScreenshot });
-        console.log(`📸 After click screenshot: ${afterClickScreenshot}`);
         
         // ============================================================
         // STEP 4: WAIT FOR RESULTS
         // ============================================================
-        console.log('⏳ Waiting 8 seconds for results...');
-        await page.waitForTimeout(8000);
-        
-        // Take screenshot of results
-        const resultsScreenshot = path.join(SCREENSHOT_DIR, `${videoId}_results.png`);
-        await page.screenshot({ path: resultsScreenshot });
-        console.log(`📸 Results screenshot: ${resultsScreenshot}`);
-        
-        console.log('📌 Waiting for quality options...');
-        try {
-            await page.waitForSelector('.download-option, button[data-testid="format-pill"], .quality-option', { 
-                timeout: 15000 
-            });
-            console.log('✅ Quality options found');
-        } catch (e) {
-            console.log('⚠️  Quality options not found');
-        }
-        
-        await page.waitForTimeout(2000);
+        console.log('⏳ Waiting 5 seconds for results...');
+        await page.waitForTimeout(5000);
         
         // ============================================================
         // STEP 5: SELECT QUALITY
         // ============================================================
         console.log(`📌 Looking for ${qualityText} quality...`);
         
-        try {
-            const qualityElement = page.getByText(qualityText);
-            if (await qualityElement.isVisible({ timeout: 5000 })) {
-                await qualityElement.click();
-                console.log(`✅ ${qualityText} selected!`);
-                selectedQuality = qualityText;
-            }
-        } catch (e) {
-            console.log(`⚠️  Error selecting ${qualityText}:`, e.message);
-        }
+        // Find quality options
+        const qualityOptions = await page.$$('.download-option');
+        console.log(`📊 Found ${qualityOptions.length} quality options`);
         
-        if (selectedQuality === 'None') {
-            console.log('📌 Trying to find any quality option...');
-            const qualities = ['1080P', '720P', '480P', '360P', '240P', '144P'];
-            for (const q of qualities) {
-                try {
-                    const el = page.getByText(q);
-                    if (await el.isVisible({ timeout: 2000 })) {
-                        await el.click();
-                        console.log(`✅ ${q} selected!`);
-                        selectedQuality = q;
-                        break;
-                    }
-                } catch (e) {}
+        if (qualityOptions.length > 0) {
+            for (const opt of qualityOptions) {
+                const text = await opt.textContent();
+                console.log(`   - ${text}`);
             }
+            
+            let qualitySelected = false;
+            for (const opt of qualityOptions) {
+                const text = await opt.textContent();
+                if (text && text.includes(qualityText)) {
+                    await opt.click();
+                    console.log(`✅ ${qualityText} selected!`);
+                    selectedQuality = qualityText;
+                    qualitySelected = true;
+                    break;
+                }
+            }
+            
+            if (!qualitySelected) {
+                console.log(`⚠️  Using first available quality`);
+                await qualityOptions[0].click();
+                console.log(`✅ Used first available quality`);
+            }
+        } else {
+            console.log('⚠️  No quality options found');
         }
         
         // ============================================================
-        // STEP 6: NETWORK INTERCEPTION
+        // STEP 6: CLICK START
+        // ============================================================
+        console.log('📌 Clicking Start...');
+        await page.waitForTimeout(2000);
+        
+        const startBtn = await page.$('#downloadButton');
+        if (startBtn) {
+            await startBtn.click();
+            console.log('✅ Start clicked!');
+        } else {
+            console.log('⚠️  Start button not found');
+        }
+        
+        // ============================================================
+        // STEP 7: NETWORK INTERCEPTION
         // ============================================================
         console.log('📌 Setting up network interception...');
         let capturedUrl = null;
         
         context.on('response', (response) => {
             const url = response.url();
-            if (url && (url.includes('vidssave.com/download') || url.includes('.mp4'))) {
-                console.log(`🌐 Download URL captured`);
+            if (url && (url.includes('.mp4') || url.includes('.webm') || url.includes('googlevideo'))) {
+                console.log(`🌐 Video URL captured`);
                 capturedUrl = url;
             }
         });
         
         // ============================================================
-        // STEP 7: CLICK DOWNLOAD
+        // STEP 8: WAIT FOR DOWNLOAD
         // ============================================================
-        const downloadBtn = await findDownloadButton(page);
-        if (downloadBtn) {
-            await Promise.all([
-                page.waitForResponse(
-                    response => response.url().includes('vidssave.com/download') || 
-                               response.url().includes('.mp4'),
-                    { timeout: 15000 }
-                ).then(response => {
-                    if (response && !capturedUrl) {
-                        capturedUrl = response.url();
-                        console.log(`✅ Download URL captured from network!`);
-                    }
-                }).catch(() => {}),
-                downloadBtn.click()
-            ]);
-            console.log('✅ Download clicked');
-        } else {
-            console.log('⚠️  Download button not found');
-        }
-        
-        // Take screenshot before closing
-        const finalScreenshot = path.join(SCREENSHOT_DIR, `${videoId}_final.png`);
-        await page.screenshot({ path: finalScreenshot });
-        console.log(`📸 Final screenshot: ${finalScreenshot}`);
-        
-        // ============================================================
-        // STEP 8: WAIT FOR NETWORK
-        // ============================================================
-        console.log('⏳ Waiting 5 seconds for network...');
-        await page.waitForTimeout(5000);
+        console.log('⏳ Waiting 10 seconds for download...');
+        await page.waitForTimeout(10000);
         
         if (capturedUrl) {
             downloadUrl = capturedUrl;
@@ -487,10 +330,10 @@ async function getDownloadUrl(videoId, quality = '720p') {
         if (!downloadUrl) {
             console.log('📌 Searching HTML for download URL...');
             const pageHtml = await page.content();
-            let match = pageHtml.match(/https?:\/\/[a-zA-Z0-9\-\.]+\.vidssave\.com\/[^\s"']+download[^\s"']*/);
+            const match = pageHtml.match(/https?:\/\/[^\s"']*\.(mp4|webm)[^\s"']*/);
             if (match) {
                 downloadUrl = match[0];
-                console.log('✅ Found vidssave download URL in HTML');
+                console.log('✅ Found video URL in HTML');
             }
         }
         
@@ -517,8 +360,7 @@ async function getDownloadUrl(videoId, quality = '720p') {
         title: videoTitle || 'video',
         quality: quality,
         videoId: videoId,
-        selectedQuality: selectedQuality,
-        screenshots: SCREENSHOT_DIR
+        selectedQuality: selectedQuality
     };
 }
 
@@ -559,46 +401,11 @@ app.post('/api/download', async (req, res) => {
     }
 });
 
-// ============================================================
-// VIEW SCREENSHOTS ENDPOINT
-// ============================================================
-
-app.get('/api/screenshots', (req, res) => {
-    try {
-        const files = fs.readdirSync(SCREENSHOT_DIR);
-        const screenshotFiles = files.filter(f => f.endsWith('.png') || f.endsWith('.html'));
-        res.json({
-            success: true,
-            screenshots: screenshotFiles,
-            count: screenshotFiles.length,
-            directory: SCREENSHOT_DIR
-        });
-    } catch (error) {
-        res.status(500).json({ error: error.message });
-    }
-});
-
-// ============================================================
-// SERVE SCREENSHOTS
-// ============================================================
-
-app.get('/api/screenshot/:filename', (req, res) => {
-    const filename = req.params.filename;
-    const filePath = path.join(SCREENSHOT_DIR, filename);
-    
-    if (!fs.existsSync(filePath)) {
-        return res.status(404).json({ error: 'File not found' });
-    }
-    
-    res.sendFile(filePath);
-});
-
 app.get('/api/health', (req, res) => {
     res.json({
         status: 'running',
-        mode: 'Vidssave Automation',
+        mode: 'YTDownload.to',
         downloadDir: DOWNLOAD_DIR,
-        screenshotDir: SCREENSHOT_DIR,
         environment: process.env.RENDER ? 'render' : 'local',
         timestamp: new Date().toISOString()
     });
@@ -618,23 +425,12 @@ app.get('/api/files', (req, res) => {
     }
 });
 
-app.get('/api/check', (req, res) => {
-    res.json({
-        status: 'ready',
-        downloadDir: DOWNLOAD_DIR,
-        screenshotDir: SCREENSHOT_DIR,
-        environment: process.env.RENDER ? 'render' : 'local'
-    });
-});
-
 app.listen(PORT, () => {
     console.log(`🚀 YouTube Downloader Server running at http://localhost:${PORT}`);
     console.log(`📌 POST /api/download - Download video`);
     console.log(`📌 GET  /api/health  - Health check`);
     console.log(`📌 GET  /api/files   - List downloaded files`);
-    console.log(`📌 GET  /api/screenshots - List screenshots`);
-    console.log(`📌 GET  /api/screenshot/:filename - View screenshot`);
     console.log('');
     console.log(`📁 Download location: ${DOWNLOAD_DIR}`);
-    console.log(`📸 Screenshot location: ${SCREENSHOT_DIR}`);
+    console.log(`🌐 Using YTDownload.to`);
 });
