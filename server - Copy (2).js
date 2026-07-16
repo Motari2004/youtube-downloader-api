@@ -11,13 +11,10 @@ app.use(cors());
 app.use(express.json());
 
 // ============================================================
-// DOWNLOAD LOCATION - Render Compatible
+// DOWNLOAD LOCATION
 // ============================================================
 
-// Use /tmp for Render (writable), or local downloads folder
-const DOWNLOAD_DIR = process.env.RENDER 
-    ? '/tmp/downloads' 
-    : path.join(__dirname, 'downloads');
+const DOWNLOAD_DIR = path.join(__dirname, 'downloads');
 
 if (!fs.existsSync(DOWNLOAD_DIR)) {
     fs.mkdirSync(DOWNLOAD_DIR, { recursive: true });
@@ -27,35 +24,50 @@ if (!fs.existsSync(DOWNLOAD_DIR)) {
 console.log(`📁 Downloads will be saved to: ${DOWNLOAD_DIR}`);
 
 // ============================================================
-// FIND BROWSER - Render Compatible
+// FIND REAL BROWSER ON SYSTEM
 // ============================================================
 
-function findBrowser() {
-    // For Render (cloud environment)
-    if (process.env.RENDER) {
-        console.log('☁️  Render environment detected');
-        // Playwright will use its bundled Chromium
-        return null;
-    }
-    
-    // Local paths
-    const paths = [
+function findRealBrowser() {
+    const chromePaths = [
         'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe',
         'C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe',
-        '/usr/bin/google-chrome',
-        '/usr/bin/google-chrome-stable',
-        '/usr/bin/chromium-browser',
-        '/usr/bin/chromium',
-    ];
+        process.env.LOCALAPPDATA ? path.join(process.env.LOCALAPPDATA, 'Google\\Chrome\\Application\\chrome.exe') : null,
+    ].filter(Boolean);
     
-    for (const p of paths) {
-        if (fs.existsSync(p)) {
-            console.log(`✅ Found browser: ${p}`);
-            return p;
+    const edgePaths = [
+        'C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe',
+        'C:\\Program Files\\Microsoft\\Edge\\Application\\msedge.exe',
+        process.env.LOCALAPPDATA ? path.join(process.env.LOCALAPPDATA, 'Microsoft\\Edge\\Application\\msedge.exe') : null,
+    ].filter(Boolean);
+    
+    const firefoxPaths = [
+        'C:\\Program Files\\Mozilla Firefox\\firefox.exe',
+        'C:\\Program Files (x86)\\Mozilla Firefox\\firefox.exe',
+        process.env.LOCALAPPDATA ? path.join(process.env.LOCALAPPDATA, 'Mozilla Firefox\\firefox.exe') : null,
+    ].filter(Boolean);
+    
+    for (const p of chromePaths) {
+        if (p && fs.existsSync(p)) {
+            console.log(`✅ Found Chrome: ${p}`);
+            return { path: p, name: 'Chrome' };
         }
     }
     
-    console.log('⚠️  No browser found, using Playwright default');
+    for (const p of edgePaths) {
+        if (p && fs.existsSync(p)) {
+            console.log(`✅ Found Edge: ${p}`);
+            return { path: p, name: 'Edge' };
+        }
+    }
+    
+    for (const p of firefoxPaths) {
+        if (p && fs.existsSync(p)) {
+            console.log(`✅ Found Firefox: ${p}`);
+            return { path: p, name: 'Firefox' };
+        }
+    }
+    
+    console.log('❌ No browser found!');
     return null;
 }
 
@@ -201,8 +213,11 @@ async function saveFile(url, filename) {
 
 async function waitForElementsToLoad(page) {
     console.log('⏳ Waiting for page to fully load...');
+    
+    // Wait for the page to be stable
     await page.waitForTimeout(2000);
     
+    // Wait for network to be idle
     try {
         await page.waitForLoadState('networkidle', { timeout: 5000 });
         console.log('✅ Network idle');
@@ -210,6 +225,7 @@ async function waitForElementsToLoad(page) {
         console.log('⚠️  Network not idle, continuing...');
     }
     
+    // Wait for any loading spinners to disappear
     try {
         await page.waitForSelector('.loading, .spinner, .loader', { 
             state: 'hidden', 
@@ -220,11 +236,21 @@ async function waitForElementsToLoad(page) {
         console.log('⚠️  No loading spinners found');
     }
     
+    // Wait for the container to be visible
+    try {
+        await page.waitForSelector('div.overflow-x-hidden.bg-\\[\\#F5F6FA\\]', { 
+            timeout: 10000 
+        });
+        console.log('✅ Results container found');
+    } catch (e) {
+        console.log('⚠️  Results container not found');
+    }
+    
     console.log('✅ Page is ready');
 }
 
 // ============================================================
-// GET DOWNLOAD URL - Render Compatible
+// GET DOWNLOAD URL - USING REAL BROWSER
 // ============================================================
 
 async function getDownloadUrl(videoId, quality = '720p') {
@@ -232,34 +258,31 @@ async function getDownloadUrl(videoId, quality = '720p') {
     console.log(`📌 Quality: ${quality}`);
     
     const qualityText = QUALITY_MAP[quality] || '720P';
-    const browserPath = findBrowser();
     
-    // Launch browser - Render optimized
-    let context;
-    try {
-        context = await chromium.launchPersistentContext(
-            process.env.RENDER ? '/tmp/playwright-profile' : (process.env.TEMP || '/tmp'),
-            {
-                headless: true,  // Always headless on Render
-                executablePath: browserPath || undefined,
-                slowMo: 100,
-                args: [
-                    '--no-sandbox',
-                    '--disable-setuid-sandbox',
-                    '--disable-dev-shm-usage',
-                    '--disable-gpu',
-                    '--disable-blink-features=AutomationControlled',
-                    '--disable-features=IsolateOrigins,site-per-process',
-                    '--disable-background-timer-throttling',
-                    '--disable-backgrounding-occluded-windows',
-                    '--disable-renderer-backgrounding'
-                ]
-            }
-        );
-    } catch (error) {
-        console.error('❌ Failed to launch browser:', error.message);
-        return { success: false, error: 'Browser launch failed: ' + error.message };
+    const browserInfo = findRealBrowser();
+    
+    if (!browserInfo) {
+        throw new Error('No browser found. Please install Chrome, Edge, or Firefox.');
     }
+    
+    const executablePath = browserInfo.path;
+    console.log(`🌐 Using ${browserInfo.name} at: ${executablePath}`);
+    
+    const userDataDir = path.join(process.env.TEMP || '/tmp', 'playwright-chrome-profile');
+    
+    const context = await chromium.launchPersistentContext(userDataDir, {
+        headless: false,
+        executablePath: executablePath,
+        slowMo: 150,
+        args: [
+            '--no-sandbox',
+            '--disable-setuid-sandbox',
+            '--disable-dev-shm-usage',
+            '--disable-gpu',
+            '--disable-blink-features=AutomationControlled',
+            '--disable-features=IsolateOrigins,site-per-process'
+        ]
+    });
     
     let page = null;
     let downloadUrl = null;
@@ -289,10 +312,14 @@ async function getDownloadUrl(videoId, quality = '720p') {
         });
         
         console.log('✅ Page loaded');
+        
+        // ============================================================
+        // STEP 2: WAIT FOR PAGE TO FULLY LOAD
+        // ============================================================
         await waitForElementsToLoad(page);
         
         // ============================================================
-        // STEP 2: ENTER URL
+        // STEP 3: ENTER URL
         // ============================================================
         const inputField = await findInputField(page);
         
@@ -306,7 +333,7 @@ async function getDownloadUrl(videoId, quality = '720p') {
         }
         
         // ============================================================
-        // STEP 3: CLICK DOWNLOAD ICON
+        // STEP 4: CLICK DOWNLOAD ICON
         // ============================================================
         console.log('📌 Clicking download icon...');
         await page.waitForTimeout(2000);
@@ -320,12 +347,13 @@ async function getDownloadUrl(videoId, quality = '720p') {
         }
         
         // ============================================================
-        // STEP 4: WAIT FOR RESULTS
+        // STEP 5: WAIT FOR RESULTS TO LOAD
         // ============================================================
-        console.log('⏳ Waiting 8 seconds for results...');
+        console.log('⏳ Waiting 8 seconds for results to load...');
         await page.waitForTimeout(8000);
         
-        console.log('📌 Waiting for quality options...');
+        // Wait for quality options to appear
+        console.log('📌 Waiting for quality options to appear...');
         try {
             await page.waitForSelector('.download-option, button[data-testid="format-pill"]', { 
                 timeout: 15000 
@@ -335,10 +363,11 @@ async function getDownloadUrl(videoId, quality = '720p') {
             console.log('⚠️  Quality options not found');
         }
         
+        // Extra wait for stability
         await page.waitForTimeout(2000);
         
         // ============================================================
-        // STEP 5: SELECT QUALITY
+        // STEP 6: SELECT QUALITY
         // ============================================================
         console.log(`📌 Looking for ${qualityText} quality...`);
         
@@ -348,11 +377,14 @@ async function getDownloadUrl(videoId, quality = '720p') {
                 await qualityElement.click();
                 console.log(`✅ ${qualityText} selected!`);
                 selectedQuality = qualityText;
+            } else {
+                console.log(`⚠️  ${qualityText} not found with getByText`);
             }
         } catch (e) {
             console.log(`⚠️  Error selecting ${qualityText}:`, e.message);
         }
         
+        // If not found, try to find any quality
         if (selectedQuality === 'None') {
             console.log('📌 Trying to find any quality option...');
             const qualities = ['1080P', '720P', '480P', '360P', '240P', '144P'];
@@ -370,23 +402,24 @@ async function getDownloadUrl(videoId, quality = '720p') {
         }
         
         // ============================================================
-        // STEP 6: NETWORK INTERCEPTION
+        // STEP 7: SETUP NETWORK INTERCEPTION
         // ============================================================
         console.log('📌 Setting up network interception...');
+        
         let capturedUrl = null;
         
         context.on('response', (response) => {
             const url = response.url();
             if (url && (url.includes('vidssave.com/download') || url.includes('.mp4'))) {
-                console.log(`🌐 Download URL captured`);
+                console.log(`🌐 Download URL captured: ${url.substring(0, 80)}...`);
                 capturedUrl = url;
             }
         });
         
         // ============================================================
-        // STEP 7: CLICK DOWNLOAD
+        // STEP 8: CLICK DOWNLOAD BUTTON
         // ============================================================
-        console.log('📌 Clicking Download...');
+        console.log('📌 Clicking Download button...');
         await page.waitForTimeout(2000);
         
         const downloadSelectors = [
@@ -416,7 +449,7 @@ async function getDownloadUrl(videoId, quality = '720p') {
                         btn.click()
                     ]);
                     
-                    console.log(`✅ Download clicked`);
+                    console.log(`✅ Download clicked via: ${selector}`);
                     downloadClicked = true;
                     break;
                 }
@@ -432,22 +465,26 @@ async function getDownloadUrl(videoId, quality = '720p') {
         }
         
         // ============================================================
-        // STEP 8: WAIT FOR NETWORK
+        // STEP 9: WAIT FOR NETWORK
         // ============================================================
-        console.log('⏳ Waiting 5 seconds for network...');
+        console.log('⏳ Waiting 5 seconds for network requests...');
         await page.waitForTimeout(5000);
         
+        // ============================================================
+        // STEP 10: GET CAPTURED URL
+        // ============================================================
         if (capturedUrl) {
             downloadUrl = capturedUrl;
             console.log('✅ Download URL captured!');
         }
         
         // ============================================================
-        // STEP 9: FALLBACK - SEARCH HTML
+        // STEP 11: FALLBACK - SEARCH HTML
         // ============================================================
         if (!downloadUrl) {
             console.log('📌 Searching HTML for download URL...');
             const pageHtml = await page.content();
+            
             let match = pageHtml.match(/https?:\/\/[a-zA-Z0-9\-\.]+\.vidssave\.com\/[^\s"']+download[^\s"']*/);
             if (match) {
                 downloadUrl = match[0];
@@ -464,7 +501,7 @@ async function getDownloadUrl(videoId, quality = '720p') {
         console.log(`📊 Download URL found: ${!!downloadUrl}`);
         
     } catch (error) {
-        console.error('❌ Error:', error.message);
+        console.error('❌ Error in getDownloadUrl:', error.message);
     } finally {
         if (page) {
             try { await page.close(); } catch (e) {}
@@ -522,9 +559,8 @@ app.post('/api/download', async (req, res) => {
 app.get('/api/health', (req, res) => {
     res.json({
         status: 'running',
-        mode: 'Vidssave Automation',
+        mode: 'Vidssave Automation (Real Chrome)',
         downloadDir: DOWNLOAD_DIR,
-        environment: process.env.RENDER ? 'render' : 'local',
         timestamp: new Date().toISOString()
     });
 });
@@ -544,24 +580,25 @@ app.get('/api/files', (req, res) => {
 });
 
 app.get('/api/check', (req, res) => {
-    const browserInfo = findBrowser();
+    const browserInfo = findRealBrowser();
     res.json({
-        status: 'ready',
         browserFound: !!browserInfo,
         browserPath: browserInfo ? browserInfo.path : null,
+        browserName: browserInfo ? browserInfo.name : null,
         downloadDir: DOWNLOAD_DIR,
-        environment: process.env.RENDER ? 'render' : 'local'
+        status: browserInfo ? 'ready' : 'missing'
     });
 });
 
 app.listen(PORT, () => {
-    const browserInfo = findBrowser();
-    console.log(`🚀 YouTube Downloader Server running at http://localhost:${PORT}`);
-    console.log(`📌 POST /api/download - Download video`);
+    const browserInfo = findRealBrowser();
+    console.log(`🚀 Vidssave Server running at http://localhost:${PORT}`);
+    console.log(`📌 POST /api/download - Download video (quality: 1080p, 720p, 480p, 360p)`);
     console.log(`📌 GET  /api/health  - Health check`);
+    console.log(`📌 GET  /api/check   - Check dependencies`);
     console.log(`📌 GET  /api/files   - List downloaded files`);
     console.log('');
+    console.log(`🌐 Using real browser: ${browserInfo ? browserInfo.name : 'None'}`);
     console.log(`📁 Download location: ${DOWNLOAD_DIR}`);
-    console.log(`☁️  Environment: ${process.env.RENDER ? 'Render' : 'Local'}`);
-    console.log(`🌐 Browser: ${browserInfo ? 'Found' : 'Playwright default'}`);
+    console.log(`⏳ Waiting for page to fully load before selection`);
 });
