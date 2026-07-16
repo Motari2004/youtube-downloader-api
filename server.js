@@ -14,7 +14,6 @@ app.use(express.json());
 // DOWNLOAD LOCATION - Render Compatible
 // ============================================================
 
-// Use /tmp for Render (writable), or local downloads folder
 const DOWNLOAD_DIR = process.env.RENDER 
     ? '/tmp/downloads' 
     : path.join(__dirname, 'downloads');
@@ -25,39 +24,6 @@ if (!fs.existsSync(DOWNLOAD_DIR)) {
 }
 
 console.log(`📁 Downloads will be saved to: ${DOWNLOAD_DIR}`);
-
-// ============================================================
-// FIND BROWSER - Render Compatible
-// ============================================================
-
-function findBrowser() {
-    // For Render (cloud environment)
-    if (process.env.RENDER) {
-        console.log('☁️  Render environment detected');
-        // Playwright will use its bundled Chromium
-        return null;
-    }
-    
-    // Local paths
-    const paths = [
-        'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe',
-        'C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe',
-        '/usr/bin/google-chrome',
-        '/usr/bin/google-chrome-stable',
-        '/usr/bin/chromium-browser',
-        '/usr/bin/chromium',
-    ];
-    
-    for (const p of paths) {
-        if (fs.existsSync(p)) {
-            console.log(`✅ Found browser: ${p}`);
-            return p;
-        }
-    }
-    
-    console.log('⚠️  No browser found, using Playwright default');
-    return null;
-}
 
 // ============================================================
 // QUALITY MAPPING
@@ -72,6 +38,29 @@ const QUALITY_MAP = {
     '144p': '144P',
     'best': '720P'
 };
+
+// ============================================================
+// CHECK PLAYWRIGHT BROWSER PATH
+// ============================================================
+
+function getPlaywrightBrowserPath() {
+    const home = process.env.HOME || '/opt/render';
+    const possiblePaths = [
+        path.join(home, '.cache', 'ms-playwright'),
+        path.join(process.cwd(), 'node_modules', '.cache', 'ms-playwright'),
+        '/opt/render/.cache/ms-playwright'
+    ];
+    
+    for (const p of possiblePaths) {
+        if (fs.existsSync(p)) {
+            console.log(`✅ Found Playwright cache: ${p}`);
+            return p;
+        }
+    }
+    
+    console.log('⚠️  Playwright cache not found');
+    return null;
+}
 
 // ============================================================
 // FIND INPUT FIELD - VIDSSAVE
@@ -232,16 +221,14 @@ async function getDownloadUrl(videoId, quality = '720p') {
     console.log(`📌 Quality: ${quality}`);
     
     const qualityText = QUALITY_MAP[quality] || '720P';
-    const browserPath = findBrowser();
     
     // Launch browser - Render optimized
     let context;
     try {
         context = await chromium.launchPersistentContext(
-            process.env.RENDER ? '/tmp/playwright-profile' : (process.env.TEMP || '/tmp'),
+            '/tmp/playwright-profile',
             {
-                headless: true,  // Always headless on Render
-                executablePath: browserPath || undefined,
+                headless: true,
                 slowMo: 100,
                 args: [
                     '--no-sandbox',
@@ -544,18 +531,14 @@ app.get('/api/files', (req, res) => {
 });
 
 app.get('/api/check', (req, res) => {
-    const browserInfo = findBrowser();
     res.json({
         status: 'ready',
-        browserFound: !!browserInfo,
-        browserPath: browserInfo ? browserInfo.path : null,
         downloadDir: DOWNLOAD_DIR,
         environment: process.env.RENDER ? 'render' : 'local'
     });
 });
 
 app.listen(PORT, () => {
-    const browserInfo = findBrowser();
     console.log(`🚀 YouTube Downloader Server running at http://localhost:${PORT}`);
     console.log(`📌 POST /api/download - Download video`);
     console.log(`📌 GET  /api/health  - Health check`);
@@ -563,5 +546,4 @@ app.listen(PORT, () => {
     console.log('');
     console.log(`📁 Download location: ${DOWNLOAD_DIR}`);
     console.log(`☁️  Environment: ${process.env.RENDER ? 'Render' : 'Local'}`);
-    console.log(`🌐 Browser: ${browserInfo ? 'Found' : 'Playwright default'}`);
 });
