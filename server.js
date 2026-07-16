@@ -18,11 +18,19 @@ const DOWNLOAD_DIR = process.env.RENDER
     ? '/tmp/downloads' 
     : path.join(__dirname, 'downloads');
 
+const SCREENSHOT_DIR = process.env.RENDER 
+    ? '/tmp/screenshots' 
+    : path.join(__dirname, 'screenshots');
+
 if (!fs.existsSync(DOWNLOAD_DIR)) {
     fs.mkdirSync(DOWNLOAD_DIR, { recursive: true });
 }
+if (!fs.existsSync(SCREENSHOT_DIR)) {
+    fs.mkdirSync(SCREENSHOT_DIR, { recursive: true });
+}
 
-console.log(`📁 Downloads will be saved to: ${DOWNLOAD_DIR}`);
+console.log(`📁 Downloads: ${DOWNLOAD_DIR}`);
+console.log(`📸 Screenshots: ${SCREENSHOT_DIR}`);
 
 // ============================================================
 // QUALITY MAPPING
@@ -39,22 +47,36 @@ const QUALITY_MAP = {
 };
 
 // ============================================================
-// FIND INPUT FIELD - YTDOWN.TO
+// FIND INPUT FIELD - YTDOWN.TO (MULTIPLE METHODS)
 // ============================================================
 
-async function findInputField(page) {
+async function findInputField(page, videoId) {
     console.log('📌 Looking for input field...');
     
-    // Wait for page to load
+    // Wait for page to stabilize
     await page.waitForTimeout(3000);
     
+    // Take screenshot of the page
+    try {
+        const screenshotPath = path.join(SCREENSHOT_DIR, `${videoId}_page.png`);
+        await page.screenshot({ path: screenshotPath, fullPage: true });
+        console.log(`📸 Screenshot saved: ${screenshotPath}`);
+    } catch (e) {
+        console.log('⚠️  Could not take screenshot');
+    }
+    
+    // Try all possible selectors
     const selectors = [
         '#postUrl',
         'input[type="text"]',
         'input[placeholder*="Paste"]',
         'input[placeholder*="paste"]',
         'input[placeholder*="YouTube"]',
-        'input[placeholder*="link"]'
+        'input[placeholder*="link"]',
+        'input[class*="url"]',
+        'input[name="url"]',
+        '.url-input',
+        '#url-input'
     ];
     
     for (const selector of selectors) {
@@ -67,13 +89,45 @@ async function findInputField(page) {
         } catch (e) {}
     }
     
-    // Try by role
+    // Try by role (Playwright's built-in)
     try {
-        const input = page.getByRole('textbox', { name: 'Paste your YouTube video link' });
+        const input = page.getByRole('textbox');
         if (await input.isVisible({ timeout: 3000 })) {
             console.log('✅ Found input by role');
             return input;
         }
+    } catch (e) {}
+    
+    // Try by placeholder text
+    try {
+        const input = page.getByPlaceholder('Paste your YouTube video link');
+        if (await input.isVisible({ timeout: 3000 })) {
+            console.log('✅ Found input by placeholder');
+            return input;
+        }
+    } catch (e) {}
+    
+    // Try to find any visible input
+    try {
+        const inputs = await page.$$('input');
+        for (const input of inputs) {
+            const isVisible = await input.isVisible();
+            if (isVisible) {
+                const type = await input.getAttribute('type');
+                if (type === 'text' || type === 'url' || !type) {
+                    console.log('✅ Found visible input');
+                    return input;
+                }
+            }
+        }
+    } catch (e) {}
+    
+    // Save HTML for debugging
+    try {
+        const htmlPath = path.join(SCREENSHOT_DIR, `${videoId}_page.html`);
+        const html = await page.content();
+        fs.writeFileSync(htmlPath, html);
+        console.log(`📄 HTML saved: ${htmlPath}`);
     } catch (e) {}
     
     console.log('❌ Input field not found');
@@ -220,13 +274,20 @@ async function getDownloadUrl(videoId, quality = '720p') {
         // ============================================================
         // STEP 2: ENTER URL
         // ============================================================
-        const inputField = await findInputField(page);
+        const inputField = await findInputField(page, videoId);
         
         if (inputField) {
             await inputField.click();
             await inputField.fill(videoUrl);
             console.log('✅ URL entered');
         } else {
+            // Take screenshot of failure
+            try {
+                const failPath = path.join(SCREENSHOT_DIR, `${videoId}_input_not_found.png`);
+                await page.screenshot({ path: failPath });
+                console.log(`📸 Input not found screenshot: ${failPath}`);
+            } catch (e) {}
+            
             console.log('❌ Input field not found');
             return { success: false, error: 'Input field not found' };
         }
@@ -254,7 +315,6 @@ async function getDownloadUrl(videoId, quality = '720p') {
         // ============================================================
         console.log(`📌 Looking for ${qualityText} quality...`);
         
-        // Find quality options
         const qualityOptions = await page.$$('.download-option');
         console.log(`📊 Found ${qualityOptions.length} quality options`);
         
@@ -406,6 +466,7 @@ app.get('/api/health', (req, res) => {
         status: 'running',
         mode: 'YTDownload.to',
         downloadDir: DOWNLOAD_DIR,
+        screenshotDir: SCREENSHOT_DIR,
         environment: process.env.RENDER ? 'render' : 'local',
         timestamp: new Date().toISOString()
     });
@@ -425,12 +486,39 @@ app.get('/api/files', (req, res) => {
     }
 });
 
+app.get('/api/screenshots', (req, res) => {
+    try {
+        const files = fs.readdirSync(SCREENSHOT_DIR);
+        res.json({
+            success: true,
+            screenshots: files,
+            count: files.length,
+            directory: SCREENSHOT_DIR
+        });
+    } catch (error) {
+        res.status(500).json({ error: error.message });
+    }
+});
+
+app.get('/api/screenshot/:filename', (req, res) => {
+    const filename = req.params.filename;
+    const filePath = path.join(SCREENSHOT_DIR, filename);
+    
+    if (!fs.existsSync(filePath)) {
+        return res.status(404).json({ error: 'File not found' });
+    }
+    
+    res.sendFile(filePath);
+});
+
 app.listen(PORT, () => {
     console.log(`🚀 YouTube Downloader Server running at http://localhost:${PORT}`);
     console.log(`📌 POST /api/download - Download video`);
     console.log(`📌 GET  /api/health  - Health check`);
     console.log(`📌 GET  /api/files   - List downloaded files`);
+    console.log(`📌 GET  /api/screenshots - List screenshots`);
+    console.log(`📌 GET  /api/screenshot/:filename - View screenshot`);
     console.log('');
     console.log(`📁 Download location: ${DOWNLOAD_DIR}`);
-    console.log(`🌐 Using YTDownload.to`);
+    console.log(`📸 Screenshot location: ${SCREENSHOT_DIR}`);
 });
