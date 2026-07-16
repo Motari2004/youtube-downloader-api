@@ -408,7 +408,7 @@ async function getDownloadUrl(videoId, quality = '720p') {
 }
 
 // ============================================================
-// STREAM FILE DIRECTLY TO CLIENT (NO SAVING ON SERVER)
+// STREAM FILE DIRECTLY TO CLIENT (BROWSER DOWNLOAD)
 // ============================================================
 
 async function streamFile(url, filename, res) {
@@ -420,9 +420,11 @@ async function streamFile(url, filename, res) {
     }
     
     try {
-        // Set headers for file download
+        // Set headers for browser download
         res.setHeader('Content-Disposition', `attachment; filename="${encodeURIComponent(filename)}"`);
         res.setHeader('Content-Type', 'video/mp4');
+        res.setHeader('Content-Transfer-Encoding', 'binary');
+        res.setHeader('Cache-Control', 'no-cache');
         
         // Stream the file directly from the source to the client
         const response = await axios({
@@ -474,6 +476,9 @@ async function streamFile(url, filename, res) {
 // API ENDPOINTS
 // ============================================================
 
+// ============================================================
+// POST endpoint - for curl and programmatic use
+// ============================================================
 app.post('/api/download', async (req, res) => {
     const { videoId, quality = '720p' } = req.body;
     
@@ -482,7 +487,6 @@ app.post('/api/download', async (req, res) => {
     }
     
     try {
-        // Get the download URL
         const result = await getDownloadUrl(videoId, quality);
         
         if (!result.success || !result.downloadUrl) {
@@ -492,7 +496,6 @@ app.post('/api/download', async (req, res) => {
             });
         }
         
-        // Stream the file directly to the client
         const filename = `${result.title}_${result.quality}_${videoId}.mp4`;
         await streamFile(result.downloadUrl, filename, res);
         
@@ -507,6 +510,80 @@ app.post('/api/download', async (req, res) => {
     }
 });
 
+// ============================================================
+// GET endpoint - for browser download (paste URL in address bar)
+// ============================================================
+app.get('/api/download', async (req, res) => {
+    const { videoId, quality = '720p' } = req.query;
+    
+    if (!videoId) {
+        return res.status(400).json({ 
+            error: 'videoId required. Example: /api/download?videoId=3qwF8aO9MmM&quality=720p' 
+        });
+    }
+    
+    try {
+        const result = await getDownloadUrl(videoId, quality);
+        
+        if (!result.success || !result.downloadUrl) {
+            return res.status(404).json({ 
+                success: false, 
+                error: result.error || 'Could not get download URL' 
+            });
+        }
+        
+        const filename = `${result.title}_${result.quality}_${videoId}.mp4`;
+        await streamFile(result.downloadUrl, filename, res);
+        
+    } catch (error) {
+        console.error('Error:', error.message);
+        if (!res.headersSent) {
+            res.status(500).json({ 
+                success: false, 
+                error: error.message 
+            });
+        }
+    }
+});
+
+// ============================================================
+// GET endpoint for direct browser download with URL parameters
+// ============================================================
+app.get('/api/download/:videoId', async (req, res) => {
+    const { videoId } = req.params;
+    const { quality = '720p' } = req.query;
+    
+    if (!videoId) {
+        return res.status(400).json({ error: 'videoId required' });
+    }
+    
+    try {
+        const result = await getDownloadUrl(videoId, quality);
+        
+        if (!result.success || !result.downloadUrl) {
+            return res.status(404).json({ 
+                success: false, 
+                error: result.error || 'Could not get download URL' 
+            });
+        }
+        
+        const filename = `${result.title}_${result.quality}_${videoId}.mp4`;
+        await streamFile(result.downloadUrl, filename, res);
+        
+    } catch (error) {
+        console.error('Error:', error.message);
+        if (!res.headersSent) {
+            res.status(500).json({ 
+                success: false, 
+                error: error.message 
+            });
+        }
+    }
+});
+
+// ============================================================
+// HEALTH CHECK
+// ============================================================
 app.get('/api/health', (req, res) => {
     res.json({
         status: 'running',
@@ -548,7 +625,14 @@ app.listen(PORT, () => {
     console.log('');
     console.log('🚀 YouTube Downloader Server running at http://localhost:' + PORT);
     console.log('🔗 Using: Zeemo.to');
-    console.log('📌 POST /api/download - Download video (streams to client)');
+    console.log('');
+    console.log('📌 Browser Download (paste in address bar):');
+    console.log(`   http://localhost:${PORT}/api/download?videoId=3qwF8aO9MmM&quality=720p`);
+    console.log('');
+    console.log('📌 Or use:');
+    console.log(`   http://localhost:${PORT}/api/download/3qwF8aO9MmM?quality=720p`);
+    console.log('');
+    console.log('📌 POST /api/download - For curl/API use');
     console.log('📌 GET  /api/health  - Health check');
     console.log('📌 GET  /api/screenshots - List screenshots');
     console.log('');
