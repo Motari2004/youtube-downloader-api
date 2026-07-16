@@ -1,262 +1,522 @@
 const express = require('express');
 const cors = require('cors');
-const { exec } = require('child_process');
+const { chromium } = require('playwright');
 const fs = require('fs');
 const path = require('path');
 
 const app = express();
-const PORT = process.env.PORT || 3001;
+const PORT = process.env.PORT || 3003;
 
 app.use(cors());
 app.use(express.json());
 
 // ============================================================
-// COOKIES - Copy from read-only to writable location
+// DOWNLOAD LOCATION
 // ============================================================
 
-function setupCookies() {
-    // Check if cookies exist in /etc/secrets (read-only)
-    const secretPath = '/etc/secrets/cookies.txt';
-    const writablePath = '/tmp/cookies.txt';
+const DOWNLOAD_DIR = path.join(__dirname, 'downloads');
+
+if (!fs.existsSync(DOWNLOAD_DIR)) {
+    fs.mkdirSync(DOWNLOAD_DIR, { recursive: true });
+    console.log(`📁 Created downloads folder: ${DOWNLOAD_DIR}`);
+}
+
+console.log(`📁 Downloads will be saved to: ${DOWNLOAD_DIR}`);
+
+// ============================================================
+// FIND REAL BROWSER ON SYSTEM
+// ============================================================
+
+function findRealBrowser() {
+    const chromePaths = [
+        'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe',
+        'C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe',
+        process.env.LOCALAPPDATA ? path.join(process.env.LOCALAPPDATA, 'Google\\Chrome\\Application\\chrome.exe') : null,
+    ].filter(Boolean);
     
-    // First, try to read from secret
-    if (fs.existsSync(secretPath)) {
-        try {
-            console.log(`📌 Found cookies at: ${secretPath}`);
-            // Copy to writable location
-            const cookieContent = fs.readFileSync(secretPath, 'utf8');
-            fs.writeFileSync(writablePath, cookieContent);
-            console.log(`✅ Cookies copied to writable location: ${writablePath}`);
-            return writablePath;
-        } catch (error) {
-            console.log(`❌ Failed to copy cookies: ${error.message}`);
+    const edgePaths = [
+        'C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe',
+        'C:\\Program Files\\Microsoft\\Edge\\Application\\msedge.exe',
+        process.env.LOCALAPPDATA ? path.join(process.env.LOCALAPPDATA, 'Microsoft\\Edge\\Application\\msedge.exe') : null,
+    ].filter(Boolean);
+    
+    const firefoxPaths = [
+        'C:\\Program Files\\Mozilla Firefox\\firefox.exe',
+        'C:\\Program Files (x86)\\Mozilla Firefox\\firefox.exe',
+        process.env.LOCALAPPDATA ? path.join(process.env.LOCALAPPDATA, 'Mozilla Firefox\\firefox.exe') : null,
+    ].filter(Boolean);
+    
+    for (const p of chromePaths) {
+        if (p && fs.existsSync(p)) {
+            console.log(`✅ Found Chrome: ${p}`);
+            return { path: p, name: 'Chrome' };
         }
     }
     
-    // Check if cookies already exist in /tmp (from previous copy)
-    if (fs.existsSync(writablePath)) {
-        console.log(`✅ Found cookies at: ${writablePath}`);
-        return writablePath;
-    }
-    
-    // Check if cookies exist in current directory (for local dev)
-    const localPaths = [
-        './cookies.txt',
-        path.join(__dirname, 'cookies.txt'),
-        path.join(process.cwd(), 'cookies.txt')
-    ];
-    
-    for (const p of localPaths) {
-        if (fs.existsSync(p)) {
-            console.log(`✅ Found cookies at: ${p}`);
-            return p;
+    for (const p of edgePaths) {
+        if (p && fs.existsSync(p)) {
+            console.log(`✅ Found Edge: ${p}`);
+            return { path: p, name: 'Edge' };
         }
     }
     
-    // Also try to read from environment variable as fallback
-    const cookiesBase64 = process.env.COOKIES_BASE64;
-    if (cookiesBase64) {
-        try {
-            console.log('📌 Found COOKIES_BASE64 env variable, decoding...');
-            const cookieBuffer = Buffer.from(cookiesBase64, 'base64');
-            const cookieContent = cookieBuffer.toString('utf8');
-            fs.writeFileSync(writablePath, cookieContent);
-            console.log(`✅ Decoded cookies to: ${writablePath}`);
-            return writablePath;
-        } catch (e) {
-            console.log('❌ Failed to decode COOKIES_BASE64:', e.message);
+    for (const p of firefoxPaths) {
+        if (p && fs.existsSync(p)) {
+            console.log(`✅ Found Firefox: ${p}`);
+            return { path: p, name: 'Firefox' };
         }
     }
     
-    console.log('⚠️  No cookies file found');
+    console.log('❌ No browser found!');
     return null;
 }
 
-const COOKIES_PATH = setupCookies();
-const COOKIES_OPTION = COOKIES_PATH ? `--cookies "${COOKIES_PATH}"` : '';
-
 // ============================================================
-// MAIN SERVER LOGIC
+// QUALITY MAPPING
 // ============================================================
 
-async function getDownloadLink(videoId, quality = 'best', type = 'video') {
-    console.log(`🎬 Fetching: https://youtu.be/${videoId}`);
-    console.log(`📌 Type: ${type}, Quality: ${quality}`);
+const QUALITY_MAP = {
+    '1080p': '1080P',
+    '720p': '720P',
+    '480p': '480P',
+    '360p': '360P',
+    '240p': '240P',
+    '144p': '144P',
+    'best': '720P'
+};
+
+// ============================================================
+// FIND INPUT FIELD - VIDSSAVE
+// ============================================================
+
+async function findInputField(page) {
+    console.log('📌 Waiting for input field...');
     
     try {
-        // Build command with cookies from writable location
-        let command = `yt-dlp ${COOKIES_OPTION} -j --no-warnings --extractor-args "youtube:player_client=web" "https://youtu.be/${videoId}"`;
-        console.log('📌 Running yt-dlp...');
-        
-        const result = await new Promise((resolve, reject) => {
-            exec(command, { maxBuffer: 50 * 1024 * 1024 }, (error, stdout, stderr) => {
-                if (error) {
-                    // Fallback: try with android client
-                    const fallbackCommand = `yt-dlp ${COOKIES_OPTION} -j --no-warnings --extractor-args "youtube:player_client=android" "https://youtu.be/${videoId}"`;
-                    console.log(`🔄 Trying fallback: ${fallbackCommand}`);
-                    
-                    exec(fallbackCommand, { maxBuffer: 50 * 1024 * 1024 }, (err, out, errOut) => {
-                        if (err) {
-                            reject(new Error(errOut || err.message));
-                            return;
-                        }
-                        resolve(out);
-                    });
-                    return;
-                }
-                resolve(stdout);
-            });
+        const input = await page.waitForSelector('#url-input-wrapper', { 
+            timeout: 10000 
         });
-        
-        const videoInfo = JSON.parse(result);
-        console.log(`📹 Video: ${videoInfo.title}`);
-        
-        const formats = videoInfo.formats || [];
-        
-        // ============================================================
-        // AUDIO ONLY
-        // ============================================================
-        if (type === 'audio') {
-            console.log('🎵 Looking for audio-only formats...');
-            
-            const audioFormats = formats.filter(f => 
-                (!f.vcodec || f.vcodec === 'none') && 
-                f.acodec && f.acodec !== 'none'
-            );
-            
-            audioFormats.sort((a, b) => {
-                const bitrateA = parseInt(a.abr) || 0;
-                const bitrateB = parseInt(b.abr) || 0;
-                return bitrateB - bitrateA;
-            });
-            
-            console.log(`📊 Found ${audioFormats.length} audio-only formats`);
-            audioFormats.forEach(f => {
-                console.log(`   - ${f.ext} (${f.abr || '?'}kbps): ${formatSize(f.filesize || 0)}`);
-            });
-            
-            let selectedAudio = null;
-            let bitrateLabel = '128kbps';
-            
-            if (quality === 'best' || quality === 'default') {
-                selectedAudio = audioFormats.find(f => f.ext === 'm4a' && parseInt(f.abr) >= 128) ||
-                               audioFormats.find(f => f.ext === 'm4a') ||
-                               audioFormats[0];
-                bitrateLabel = `${selectedAudio?.abr || '128'}kbps`;
-            } else if (quality === 'high') {
-                selectedAudio = audioFormats.find(f => f.ext === 'm4a' && parseInt(f.abr) >= 192) ||
-                               audioFormats.find(f => f.ext === 'm4a' && parseInt(f.abr) >= 128) ||
-                               audioFormats[0];
-                bitrateLabel = `${selectedAudio?.abr || '192'}kbps`;
-            } else if (quality === 'medium') {
-                selectedAudio = audioFormats.find(f => f.ext === 'm4a' && parseInt(f.abr) >= 128) ||
-                               audioFormats.find(f => f.ext === 'm4a') ||
-                               audioFormats[0];
-                bitrateLabel = `${selectedAudio?.abr || '128'}kbps`;
-            } else if (quality === 'low') {
-                selectedAudio = audioFormats.find(f => f.ext === 'm4a' && parseInt(f.abr) <= 64) ||
-                               audioFormats[audioFormats.length - 1] ||
-                               audioFormats[0];
-                bitrateLabel = `${selectedAudio?.abr || '64'}kbps`;
-            } else {
-                selectedAudio = audioFormats[0];
-                bitrateLabel = `${selectedAudio?.abr || '128'}kbps`;
-            }
-            
-            if (selectedAudio && selectedAudio.url) {
-                console.log(`✅ Selected audio: ${selectedAudio.ext} (${bitrateLabel})`);
-                
-                return {
-                    success: true,
-                    videoId: videoId,
-                    downloadUrl: selectedAudio.url,
-                    quality: bitrateLabel,
-                    title: videoInfo.title || 'audio',
-                    format: 'mp3',
-                    type: 'audio',
-                    filesize: selectedAudio.filesize || 0,
-                    thumbnail: videoInfo.thumbnail,
-                    channel: videoInfo.channel || videoInfo.uploader,
-                    duration: videoInfo.duration
-                };
-            }
-            
-            return { success: false, error: 'No audio format found' };
+        if (input) {
+            console.log('✅ Found input by #url-input-wrapper');
+            return input;
         }
-        
-        // ============================================================
-        // VIDEO
-        // ============================================================
-        console.log('🎬 Looking for video formats...');
-        
-        const videoWithAudio = formats.filter(f => 
-            f.vcodec && f.vcodec !== 'none' && 
-            f.acodec && f.acodec !== 'none'
-        );
-        
-        videoWithAudio.sort((a, b) => {
-            const hA = parseInt(a.height) || 0;
-            const hB = parseInt(b.height) || 0;
-            return hB - hA;
-        });
-        
-        let selectedFormat = null;
-        let qualityLabel = '';
-        
-        if (quality === 'best') {
-            selectedFormat = videoWithAudio[0];
-            qualityLabel = selectedFormat ? (selectedFormat.height + 'p') : 'best';
-        } else {
-            const targetHeight = parseInt(quality) || 0;
-            if (targetHeight > 0) {
-                selectedFormat = videoWithAudio.find(f => parseInt(f.height) === targetHeight);
-            }
-            if (!selectedFormat) {
-                selectedFormat = videoWithAudio[0];
-            }
-            qualityLabel = selectedFormat ? (selectedFormat.height + 'p') : 'best';
-        }
-        
-        if (selectedFormat && selectedFormat.url) {
-            console.log(`✅ Selected ${qualityLabel} video`);
-            return {
-                success: true,
-                videoId: videoId,
-                downloadUrl: selectedFormat.url,
-                quality: qualityLabel,
-                title: videoInfo.title || 'video',
-                format: selectedFormat.ext || 'mp4',
-                filesize: selectedFormat.filesize || 0,
-                thumbnail: videoInfo.thumbnail,
-                channel: videoInfo.channel || videoInfo.uploader,
-                duration: videoInfo.duration,
-                type: 'video'
-            };
-        }
-        
-        return {
-            success: false,
-            videoId: videoId,
-            error: 'No download URL found'
-        };
-        
-    } catch (error) {
-        console.error('❌ Error:', error.message);
-        return {
-            success: false,
-            videoId: videoId,
-            error: error.message
-        };
+    } catch (e) {
+        console.log('⚠️  #url-input-wrapper not found');
     }
+    
+    try {
+        const input = await page.waitForSelector('input[type="text"]', { 
+            timeout: 5000 
+        });
+        if (input) {
+            console.log('✅ Found input by type');
+            return input;
+        }
+    } catch (e) {}
+    
+    console.log('❌ All input selectors failed');
+    return null;
 }
 
-// Helper: Format file size
-function formatSize(bytes) {
-    if (bytes === 0) return '0 B';
-    const k = 1024;
-    const sizes = ['B', 'KB', 'MB', 'GB'];
-    const i = Math.floor(Math.log(bytes) / Math.log(k));
-    return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
+// ============================================================
+// SAVE FILE TO DOWNLOADS FOLDER
+// ============================================================
+
+async function saveFile(url, filename) {
+    return new Promise((resolve, reject) => {
+        const filePath = path.join(DOWNLOAD_DIR, filename);
+        console.log(`📥 Saving to: ${filePath}`);
+        
+        if (!url || (!url.includes('vidssave.com') && !url.includes('googlevideo.com') && !url.includes('.mp4'))) {
+            console.log('❌ URL is not a valid video URL');
+            reject(new Error('Invalid video URL'));
+            return;
+        }
+        
+        const file = fs.createWriteStream(filePath);
+        let downloaded = 0;
+        let total = 0;
+        
+        const protocol = url.startsWith('https') ? require('https') : require('http');
+        
+        const request = protocol.get(url, {
+            headers: {
+                'Referer': 'https://vidssave.com/',
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+            }
+        }, (response) => {
+            if (response.statusCode === 301 || response.statusCode === 302) {
+                console.log(`🔄 Redirecting...`);
+                saveFile(response.headers.location, filename).then(resolve).catch(reject);
+                return;
+            }
+            
+            const contentType = response.headers['content-type'] || '';
+            if (contentType.includes('text/html')) {
+                console.log('⚠️  Received HTML instead of video!');
+                reject(new Error('URL points to webpage, not video'));
+                return;
+            }
+            
+            if (response.statusCode === 403) {
+                console.log('⚠️  URL expired (403). Need to get fresh URL.');
+                reject(new Error('URL expired. Please try again.'));
+                return;
+            }
+            
+            if (response.statusCode !== 200) {
+                reject(new Error(`HTTP ${response.statusCode}`));
+                return;
+            }
+            
+            total = parseInt(response.headers['content-length']) || 0;
+            console.log(`📊 File size: ${(total / 1024 / 1024).toFixed(2)} MB`);
+            
+            response.on('data', (chunk) => {
+                downloaded += chunk.length;
+                const percent = total ? (downloaded / total * 100).toFixed(1) : '?';
+                process.stdout.write(`\r   Downloading: ${percent}% (${(downloaded / 1024 / 1024).toFixed(2)} MB)`);
+            });
+            
+            response.pipe(file);
+            
+            file.on('finish', () => {
+                file.close();
+                console.log('');
+                console.log(`✅ Download complete: ${filename}`);
+                console.log(`📁 Saved to: ${filePath}`);
+                console.log(`📊 Size: ${(downloaded / 1024 / 1024).toFixed(2)} MB`);
+                resolve({ success: true, filePath, size: downloaded });
+            });
+            
+            file.on('error', (err) => {
+                console.log('');
+                reject(err);
+            });
+        });
+        
+        request.on('error', (err) => {
+            console.log('');
+            reject(err);
+        });
+        
+        request.setTimeout(60000, () => {
+            request.destroy();
+            reject(new Error('Download timeout'));
+        });
+    });
+}
+
+// ============================================================
+// WAIT FOR ELEMENTS TO LOAD
+// ============================================================
+
+async function waitForElementsToLoad(page) {
+    console.log('⏳ Waiting for page to fully load...');
+    
+    // Wait for the page to be stable
+    await page.waitForTimeout(2000);
+    
+    // Wait for network to be idle
+    try {
+        await page.waitForLoadState('networkidle', { timeout: 5000 });
+        console.log('✅ Network idle');
+    } catch (e) {
+        console.log('⚠️  Network not idle, continuing...');
+    }
+    
+    // Wait for any loading spinners to disappear
+    try {
+        await page.waitForSelector('.loading, .spinner, .loader', { 
+            state: 'hidden', 
+            timeout: 5000 
+        });
+        console.log('✅ Loading spinners gone');
+    } catch (e) {
+        console.log('⚠️  No loading spinners found');
+    }
+    
+    // Wait for the container to be visible
+    try {
+        await page.waitForSelector('div.overflow-x-hidden.bg-\\[\\#F5F6FA\\]', { 
+            timeout: 10000 
+        });
+        console.log('✅ Results container found');
+    } catch (e) {
+        console.log('⚠️  Results container not found');
+    }
+    
+    console.log('✅ Page is ready');
+}
+
+// ============================================================
+// GET DOWNLOAD URL - USING REAL BROWSER
+// ============================================================
+
+async function getDownloadUrl(videoId, quality = '720p') {
+    console.log(`🎬 Getting download URL for video: ${videoId}`);
+    console.log(`📌 Quality: ${quality}`);
+    
+    const qualityText = QUALITY_MAP[quality] || '720P';
+    
+    const browserInfo = findRealBrowser();
+    
+    if (!browserInfo) {
+        throw new Error('No browser found. Please install Chrome, Edge, or Firefox.');
+    }
+    
+    const executablePath = browserInfo.path;
+    console.log(`🌐 Using ${browserInfo.name} at: ${executablePath}`);
+    
+    const userDataDir = path.join(process.env.TEMP || '/tmp', 'playwright-chrome-profile');
+    
+    const context = await chromium.launchPersistentContext(userDataDir, {
+        headless: false,
+        executablePath: executablePath,
+        slowMo: 150,
+        args: [
+            '--no-sandbox',
+            '--disable-setuid-sandbox',
+            '--disable-dev-shm-usage',
+            '--disable-gpu',
+            '--disable-blink-features=AutomationControlled',
+            '--disable-features=IsolateOrigins,site-per-process'
+        ]
+    });
+    
+    let page = null;
+    let downloadUrl = null;
+    let videoTitle = 'video';
+    let selectedQuality = 'None';
+    
+    try {
+        page = await context.newPage();
+        
+        await page.addInitScript(() => {
+            Object.defineProperty(navigator, 'webdriver', {
+                get: () => undefined
+            });
+        });
+        
+        await page.setViewportSize({ width: 1366, height: 768 });
+        
+        const videoUrl = `https://youtu.be/${videoId}`;
+        
+        // ============================================================
+        // STEP 1: NAVIGATE TO VIDSSAVE
+        // ============================================================
+        console.log('📌 Opening vidssave.com...');
+        await page.goto('https://vidssave.com/youtube-video-downloader-7gt', {
+            waitUntil: 'domcontentloaded',
+            timeout: 60000
+        });
+        
+        console.log('✅ Page loaded');
+        
+        // ============================================================
+        // STEP 2: WAIT FOR PAGE TO FULLY LOAD
+        // ============================================================
+        await waitForElementsToLoad(page);
+        
+        // ============================================================
+        // STEP 3: ENTER URL
+        // ============================================================
+        const inputField = await findInputField(page);
+        
+        if (inputField) {
+            await inputField.click();
+            await inputField.fill(videoUrl);
+            console.log('✅ URL entered');
+        } else {
+            console.log('❌ Input field not found');
+            return { success: false, error: 'Input field not found' };
+        }
+        
+        // ============================================================
+        // STEP 4: CLICK DOWNLOAD ICON
+        // ============================================================
+        console.log('📌 Clicking download icon...');
+        await page.waitForTimeout(2000);
+        
+        const downloadIcon = await page.$('[alt="download icon"]');
+        if (downloadIcon) {
+            await downloadIcon.click();
+            console.log('✅ Download icon clicked!');
+        } else {
+            console.log('⚠️  Download icon not found');
+        }
+        
+        // ============================================================
+        // STEP 5: WAIT FOR RESULTS TO LOAD
+        // ============================================================
+        console.log('⏳ Waiting 8 seconds for results to load...');
+        await page.waitForTimeout(8000);
+        
+        // Wait for quality options to appear
+        console.log('📌 Waiting for quality options to appear...');
+        try {
+            await page.waitForSelector('.download-option, button[data-testid="format-pill"]', { 
+                timeout: 15000 
+            });
+            console.log('✅ Quality options found');
+        } catch (e) {
+            console.log('⚠️  Quality options not found');
+        }
+        
+        // Extra wait for stability
+        await page.waitForTimeout(2000);
+        
+        // ============================================================
+        // STEP 6: SELECT QUALITY
+        // ============================================================
+        console.log(`📌 Looking for ${qualityText} quality...`);
+        
+        try {
+            const qualityElement = page.getByText(qualityText);
+            if (await qualityElement.isVisible({ timeout: 5000 })) {
+                await qualityElement.click();
+                console.log(`✅ ${qualityText} selected!`);
+                selectedQuality = qualityText;
+            } else {
+                console.log(`⚠️  ${qualityText} not found with getByText`);
+            }
+        } catch (e) {
+            console.log(`⚠️  Error selecting ${qualityText}:`, e.message);
+        }
+        
+        // If not found, try to find any quality
+        if (selectedQuality === 'None') {
+            console.log('📌 Trying to find any quality option...');
+            const qualities = ['1080P', '720P', '480P', '360P', '240P', '144P'];
+            for (const q of qualities) {
+                try {
+                    const el = page.getByText(q);
+                    if (await el.isVisible({ timeout: 2000 })) {
+                        await el.click();
+                        console.log(`✅ ${q} selected!`);
+                        selectedQuality = q;
+                        break;
+                    }
+                } catch (e) {}
+            }
+        }
+        
+        // ============================================================
+        // STEP 7: SETUP NETWORK INTERCEPTION
+        // ============================================================
+        console.log('📌 Setting up network interception...');
+        
+        let capturedUrl = null;
+        
+        context.on('response', (response) => {
+            const url = response.url();
+            if (url && (url.includes('vidssave.com/download') || url.includes('.mp4'))) {
+                console.log(`🌐 Download URL captured: ${url.substring(0, 80)}...`);
+                capturedUrl = url;
+            }
+        });
+        
+        // ============================================================
+        // STEP 8: CLICK DOWNLOAD BUTTON
+        // ============================================================
+        console.log('📌 Clicking Download button...');
+        await page.waitForTimeout(2000);
+        
+        const downloadSelectors = [
+            'span.text-\\[0\\.28rem\\].text-\\[var\\(--brand-primary\\)\\].md\\:text-\\[18px\\]',
+            'text=Download',
+            'button:has-text("Download")',
+            'a:has-text("Download")',
+            '.download-btn'
+        ];
+        
+        let downloadClicked = false;
+        for (const selector of downloadSelectors) {
+            try {
+                const btn = await page.$(selector);
+                if (btn) {
+                    await Promise.all([
+                        page.waitForResponse(
+                            response => response.url().includes('vidssave.com/download') || 
+                                       response.url().includes('.mp4'),
+                            { timeout: 15000 }
+                        ).then(response => {
+                            if (response && !capturedUrl) {
+                                capturedUrl = response.url();
+                                console.log(`✅ Download URL captured from network!`);
+                            }
+                        }).catch(() => {}),
+                        btn.click()
+                    ]);
+                    
+                    console.log(`✅ Download clicked via: ${selector}`);
+                    downloadClicked = true;
+                    break;
+                }
+            } catch (e) {}
+        }
+        
+        if (!downloadClicked) {
+            const btn = page.getByText('Download', { exact: false });
+            if (await btn.isVisible()) {
+                await btn.click();
+                console.log('✅ Download clicked by text');
+            }
+        }
+        
+        // ============================================================
+        // STEP 9: WAIT FOR NETWORK
+        // ============================================================
+        console.log('⏳ Waiting 5 seconds for network requests...');
+        await page.waitForTimeout(5000);
+        
+        // ============================================================
+        // STEP 10: GET CAPTURED URL
+        // ============================================================
+        if (capturedUrl) {
+            downloadUrl = capturedUrl;
+            console.log('✅ Download URL captured!');
+        }
+        
+        // ============================================================
+        // STEP 11: FALLBACK - SEARCH HTML
+        // ============================================================
+        if (!downloadUrl) {
+            console.log('📌 Searching HTML for download URL...');
+            const pageHtml = await page.content();
+            
+            let match = pageHtml.match(/https?:\/\/[a-zA-Z0-9\-\.]+\.vidssave\.com\/[^\s"']+download[^\s"']*/);
+            if (match) {
+                downloadUrl = match[0];
+                console.log('✅ Found vidssave download URL in HTML');
+            }
+        }
+        
+        videoTitle = await page.evaluate(() => {
+            const titleEl = document.querySelector('h1, .title, [class*="title"]');
+            return titleEl ? titleEl.textContent.trim().replace(/[^a-zA-Z0-9]/g, '_') : 'video';
+        });
+        
+        console.log(`📊 Video title: ${videoTitle}`);
+        console.log(`📊 Download URL found: ${!!downloadUrl}`);
+        
+    } catch (error) {
+        console.error('❌ Error in getDownloadUrl:', error.message);
+    } finally {
+        if (page) {
+            try { await page.close(); } catch (e) {}
+        }
+        try { await context.close(); } catch (e) {}
+    }
+    
+    return {
+        success: !!downloadUrl,
+        downloadUrl: downloadUrl || null,
+        title: videoTitle || 'video',
+        quality: quality,
+        videoId: videoId,
+        selectedQuality: selectedQuality
+    };
 }
 
 // ============================================================
@@ -264,124 +524,81 @@ function formatSize(bytes) {
 // ============================================================
 
 app.post('/api/download', async (req, res) => {
-    const { videoId, quality = 'best', type = 'video' } = req.body;
-    
-    if (!videoId) {
-        return res.status(400).json({ error: 'videoId required' });
-    }
-    
-    const result = await getDownloadLink(videoId, quality, type);
-    res.json(result);
-});
-
-app.post('/api/info', async (req, res) => {
-    const { videoId } = req.body;
+    const { videoId, quality = '720p' } = req.body;
     
     if (!videoId) {
         return res.status(400).json({ error: 'videoId required' });
     }
     
     try {
-        const command = `yt-dlp ${COOKIES_OPTION} -j --no-warnings "https://youtu.be/${videoId}"`;
-        const result = await new Promise((resolve, reject) => {
-            exec(command, { maxBuffer: 50 * 1024 * 1024 }, (error, stdout, stderr) => {
-                if (error) reject(new Error(stderr || error.message));
-                else resolve(stdout);
-            });
-        });
+        const result = await getDownloadUrl(videoId, quality);
         
-        const videoInfo = JSON.parse(result);
-        const formats = videoInfo.formats || [];
-        
-        const videoFormats = formats.filter(f => 
-            f.vcodec && f.vcodec !== 'none' && 
-            f.acodec && f.acodec !== 'none'
-        );
-        
-        const qualities = [];
-        const seen = new Set();
-        for (const f of videoFormats) {
-            const height = parseInt(f.height) || 0;
-            if (height > 0 && !seen.has(height)) {
-                seen.add(height);
-                qualities.push({
-                    height: height,
-                    label: height + 'p',
-                    format: f.ext || 'mp4',
-                    filesize: f.filesize || 0
-                });
+        if (result.success && result.downloadUrl) {
+            const filename = `${result.title}_${result.quality}_${videoId}.mp4`;
+            console.log(`📥 Downloading file to: ${DOWNLOAD_DIR}`);
+            
+            try {
+                const saveResult = await saveFile(result.downloadUrl, filename);
+                result.filePath = saveResult.filePath;
+                result.savedTo = DOWNLOAD_DIR;
+            } catch (downloadError) {
+                console.error('❌ Error saving file:', downloadError.message);
             }
         }
-        qualities.sort((a, b) => b.height - a.height);
         
-        const audioFormats = formats.filter(f => 
-            (!f.vcodec || f.vcodec === 'none') && 
-            f.acodec && f.acodec !== 'none'
-        ).map(f => ({
-            format: f.ext || 'm4a',
-            bitrate: f.abr || '128',
-            filesize: f.filesize || 0,
-            label: `${f.ext || 'm4a'} (${f.abr || '128'}kbps) - ${formatSize(f.filesize || 0)}`
-        }));
-        
-        res.json({
-            success: true,
-            title: videoInfo.title,
-            duration: videoInfo.duration,
-            thumbnail: videoInfo.thumbnail,
-            channel: videoInfo.channel || videoInfo.uploader,
-            qualities: qualities,
-            audioFormats: audioFormats,
-            viewCount: videoInfo.view_count
-        });
-        
+        res.json(result);
     } catch (error) {
-        res.json({ success: false, error: error.message });
+        console.error('Error:', error.message);
+        res.status(500).json({ 
+            success: false, 
+            error: error.message 
+        });
     }
-});
-
-app.get('/api/check', (req, res) => {
-    const checks = {
-        cookies: {
-            exists: COOKIES_PATH !== null,
-            path: COOKIES_PATH,
-            source: 'Secret File (copied to /tmp)'
-        }
-    };
-    
-    exec('yt-dlp --version', (error, stdout) => {
-        checks.ytDlp = {
-            installed: !error,
-            version: error ? null : stdout.trim()
-        };
-        res.json(checks);
-    });
 });
 
 app.get('/api/health', (req, res) => {
     res.json({
         status: 'running',
-        mode: 'yt-dlp backend',
-        cookies: COOKIES_PATH ? '✅ Present' : '❌ Missing',
-        cookieSource: COOKIES_PATH ? 'Secret File (copied to /tmp)' : 'None',
+        mode: 'Vidssave Automation (Real Chrome)',
+        downloadDir: DOWNLOAD_DIR,
         timestamp: new Date().toISOString()
     });
 });
 
-// ============================================================
-// START SERVER
-// ============================================================
+app.get('/api/files', (req, res) => {
+    try {
+        const files = fs.readdirSync(DOWNLOAD_DIR);
+        res.json({
+            success: true,
+            files: files,
+            count: files.length,
+            directory: DOWNLOAD_DIR
+        });
+    } catch (error) {
+        res.status(500).json({ error: error.message });
+    }
+});
+
+app.get('/api/check', (req, res) => {
+    const browserInfo = findRealBrowser();
+    res.json({
+        browserFound: !!browserInfo,
+        browserPath: browserInfo ? browserInfo.path : null,
+        browserName: browserInfo ? browserInfo.name : null,
+        downloadDir: DOWNLOAD_DIR,
+        status: browserInfo ? 'ready' : 'missing'
+    });
+});
 
 app.listen(PORT, () => {
-    console.log(`🚀 Server running at http://localhost:${PORT}`);
-    console.log(`📌 POST /api/download - Download video/audio`);
-    console.log(`📌 POST /api/info     - Get video info`);
-    console.log(`📌 GET  /api/check   - Check dependencies`);
+    const browserInfo = findRealBrowser();
+    console.log(`🚀 Vidssave Server running at http://localhost:${PORT}`);
+    console.log(`📌 POST /api/download - Download video (quality: 1080p, 720p, 480p, 360p)`);
     console.log(`📌 GET  /api/health  - Health check`);
+    console.log(`📌 GET  /api/check   - Check dependencies`);
+    console.log(`📌 GET  /api/files   - List downloaded files`);
     console.log('');
-    console.log(`🍪 Cookies: ${COOKIES_PATH ? '✅ Found' : '❌ Not found'}`);
-    console.log(`📌 Cookie Source: ${COOKIES_PATH ? 'Secret File (copied to /tmp)' : 'None'}`);
-    console.log('⚡ Using yt-dlp backend');
-    console.log('📌 Video: MP4 with best quality');
-    console.log('📌 Audio: MP3 format');
+    console.log(`🌐 Using real browser: ${browserInfo ? browserInfo.name : 'None'}`);
+    console.log(`📁 Download location: ${DOWNLOAD_DIR}`);
+    console.log(`⏳ Waiting for page to fully load before selection`);
 });
