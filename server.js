@@ -82,18 +82,11 @@ async function getDownloadUrl(videoId, quality = '720p') {
             screen: { width: 1920, height: 1080 },
             userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
             locale: 'en-US',
-            timezoneId: 'America/New_York',
-            deviceScaleFactor: 1,
-            hasTouch: false,
-            isMobile: false,
-            extraHTTPHeaders: {
-                'Accept-Language': 'en-US,en;q=0.9'
-            }
+            timezoneId: 'America/New_York'
         });
         
         const page = await context.newPage();
         
-        // Enhanced stealth script
         await page.addInitScript(() => {
             Object.defineProperty(navigator, 'webdriver', {
                 get: () => undefined
@@ -261,7 +254,6 @@ async function getDownloadUrl(videoId, quality = '720p') {
         
         let startClicked = false;
         
-        // Try by role
         try {
             const startButton = page.getByRole('button', { name: 'Start' });
             if (await startButton.isVisible({ timeout: 3000 })) {
@@ -273,7 +265,6 @@ async function getDownloadUrl(videoId, quality = '720p') {
             console.log('⚠️  Role method failed:', e.message);
         }
         
-        // Try by text
         if (!startClicked) {
             try {
                 const buttons = await page.$$('button');
@@ -291,7 +282,6 @@ async function getDownloadUrl(videoId, quality = '720p') {
             }
         }
         
-        // Try by aria-label
         if (!startClicked) {
             try {
                 const startButton = page.getByLabel('Start');
@@ -303,7 +293,6 @@ async function getDownloadUrl(videoId, quality = '720p') {
             } catch (e) {}
         }
         
-        // Try by class
         if (!startClicked) {
             try {
                 const startButton = await page.$('[class*="start"], [id*="start"], .btn-start, #start-btn');
@@ -333,7 +322,6 @@ async function getDownloadUrl(videoId, quality = '720p') {
         
         let mp4Clicked = false;
         
-        // Try by role
         try {
             const mp4Link = page.getByRole('link', { name: 'MP4' });
             if (await mp4Link.isVisible({ timeout: 3000 })) {
@@ -345,7 +333,6 @@ async function getDownloadUrl(videoId, quality = '720p') {
             console.log('⚠️  Role method failed:', e.message);
         }
         
-        // Try by text
         if (!mp4Clicked) {
             try {
                 const links = await page.$$('a');
@@ -363,7 +350,6 @@ async function getDownloadUrl(videoId, quality = '720p') {
             }
         }
         
-        // Try by href
         if (!mp4Clicked) {
             try {
                 const mp4Link = await page.$('a[href*="mp4"], a[href*="MP4"]');
@@ -394,7 +380,6 @@ async function getDownloadUrl(videoId, quality = '720p') {
         
         let downloadNowClicked = false;
         
-        // Try by role
         try {
             const downloadNowBtn = page.getByRole('link', { name: 'Download MP4 now' });
             if (await downloadNowBtn.isVisible({ timeout: 3000 })) {
@@ -406,7 +391,6 @@ async function getDownloadUrl(videoId, quality = '720p') {
             console.log('⚠️  Role method failed:', e.message);
         }
         
-        // Try by text
         if (!downloadNowClicked) {
             try {
                 const links = await page.$$('a, button');
@@ -424,7 +408,6 @@ async function getDownloadUrl(videoId, quality = '720p') {
             }
         }
         
-        // Try by class
         if (!downloadNowClicked) {
             try {
                 const downloadBtn = await page.$('[class*="download"], [id*="download"], .btn-download, #download-btn');
@@ -694,6 +677,35 @@ app.get('/api/files', (req, res) => {
     }
 });
 
+// ============================================================
+// SCREENSHOTS ENDPOINT - ADDED FOR DEBUGGING
+// ============================================================
+
+app.get('/api/screenshots', (req, res) => {
+    try {
+        const files = fs.readdirSync(SCREENSHOT_DIR);
+        res.json({
+            success: true,
+            screenshots: files,
+            count: files.length,
+            directory: SCREENSHOT_DIR
+        });
+    } catch (error) {
+        res.status(500).json({ error: error.message });
+    }
+});
+
+app.get('/api/screenshot/:filename', (req, res) => {
+    const filename = req.params.filename;
+    const filePath = path.join(SCREENSHOT_DIR, filename);
+    
+    if (!fs.existsSync(filePath)) {
+        return res.status(404).json({ error: 'File not found' });
+    }
+    
+    res.sendFile(filePath);
+});
+
 app.listen(PORT, () => {
     console.log('');
     console.log('🚀 YouTube Downloader Server running at http://localhost:' + PORT);
@@ -701,6 +713,8 @@ app.listen(PORT, () => {
     console.log('📌 POST /api/download - Download video');
     console.log('📌 GET  /api/health  - Health check');
     console.log('📌 GET  /api/files   - List downloaded files');
+    console.log('📌 GET  /api/screenshots - List screenshots');
+    console.log('📌 GET  /api/screenshot/:filename - View screenshot');
     console.log('');
     console.log('📁 Download location: ' + DOWNLOAD_DIR);
     console.log('📸 Screenshot location: ' + SCREENSHOT_DIR);
