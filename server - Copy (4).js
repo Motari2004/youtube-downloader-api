@@ -11,16 +11,11 @@ app.use(cors());
 app.use(express.json());
 
 // ============================================================
-// DOWNLOAD LOCATION - Render uses /tmp for ephemeral storage
+// DOWNLOAD LOCATION
 // ============================================================
 
-const DOWNLOAD_DIR = process.env.RENDER 
-    ? '/tmp/downloads' 
-    : path.join(__dirname, 'downloads');
-
-const SCREENSHOT_DIR = process.env.RENDER 
-    ? '/tmp/screenshots' 
-    : path.join(__dirname, 'screenshots');
+const DOWNLOAD_DIR = path.join(__dirname, 'downloads');
+const SCREENSHOT_DIR = path.join(__dirname, 'screenshots');
 
 if (!fs.existsSync(DOWNLOAD_DIR)) {
     fs.mkdirSync(DOWNLOAD_DIR, { recursive: true });
@@ -31,6 +26,7 @@ if (!fs.existsSync(SCREENSHOT_DIR)) {
 
 console.log(`📁 Downloads: ${DOWNLOAD_DIR}`);
 console.log(`📸 Screenshots: ${SCREENSHOT_DIR}`);
+console.log(`👁️  Browser mode: VISIBLE (headless: false)`);
 
 // ============================================================
 // QUALITY MAPPING - Zeemo
@@ -45,14 +41,14 @@ const QUALITY_MAP = {
 };
 
 // ============================================================
-// GET DOWNLOAD URL - ZEEMO.TO (HEADLESS FOR RENDER)
+// GET DOWNLOAD URL - ZEEMO.TO
 // ============================================================
 
 async function getDownloadUrl(videoId, quality = '720p') {
     console.log(`🎬 Getting download URL for video: ${videoId}`);
     console.log(`📌 Quality: ${quality}`);
     console.log(`🔗 Using: Zeemo.to`);
-    console.log(`👁️  Browser mode: HEADLESS (Render)`);
+    console.log(`👁️  Browser is VISIBLE - watch what happens!`);
     
     const qualityText = QUALITY_MAP[quality] || '720p';
     
@@ -60,11 +56,11 @@ async function getDownloadUrl(videoId, quality = '720p') {
     let context;
     
     try {
-        console.log('🚀 Launching browser (headless)...');
+        console.log('🚀 Launching browser (VISIBLE mode)...');
         
         browser = await chromium.launch({
-            headless: true,  // 👈 HEADLESS FOR RENDER
-            slowMo: 50,
+            headless: false,
+            slowMo: 200,
             args: [
                 '--no-sandbox',
                 '--disable-setuid-sandbox',
@@ -72,9 +68,11 @@ async function getDownloadUrl(videoId, quality = '720p') {
                 '--disable-gpu',
                 '--disable-blink-features=AutomationControlled',
                 '--disable-features=IsolateOrigins,site-per-process',
+                '--start-maximized',
+                '--window-position=0,0',
                 '--window-size=1920,1080',
-                '--disable-web-security',
-                '--disable-features=BlockInsecurePrivateNetworkRequests'
+                '--force-device-scale-factor=1',
+                '--disable-infobars'
             ]
         });
         
@@ -119,10 +117,10 @@ async function getDownloadUrl(videoId, quality = '720p') {
             timeout: 60000
         });
         
-        console.log('✅ Page loaded');
+        console.log('✅ Page loaded - LOOK AT THE BROWSER!');
         await page.waitForTimeout(3000);
         
-        // Save screenshot for debugging
+        // Save screenshot
         try {
             const screenshotPath = path.join(SCREENSHOT_DIR, `${videoId}_zeemo_page.png`);
             await page.screenshot({ path: screenshotPath, fullPage: true });
@@ -265,20 +263,23 @@ async function getDownloadUrl(videoId, quality = '720p') {
         await page.waitForTimeout(5000);
         
         // ============================================================
-        // STEP 6: SET UP NETWORK INTERCEPTION
+        // STEP 6: SET UP NETWORK INTERCEPTION - ONLY CAPTURE VIDEO URLs
         // ============================================================
         console.log('📌 Setting up network interception for video URL...');
         
         let videoDownloadUrl = null;
         
+        // Listen for all responses
         context.on('response', async (response) => {
             const url = response.url();
             
+            // ONLY capture real video URLs - ignore analytics, ads, etc.
             if (url && (
                 url.includes('sf-converter.com/prod-new/download') ||
                 url.includes('.mp4') || 
                 url.includes('googlevideo')
             )) {
+                // Make sure it's not analytics or tracking
                 if (!url.includes('google-analytics') && 
                     !url.includes('analytics') && 
                     !url.includes('tracking') &&
@@ -290,15 +291,18 @@ async function getDownloadUrl(videoId, quality = '720p') {
         });
         
         // ============================================================
-        // STEP 7: CLICK THE "Download" BUTTON
+        // STEP 7: FIND AND CLICK THE "Download" BUTTON (FIRST ONE)
         // ============================================================
         console.log('📌 Looking for "Download" button...');
+        console.log('👀 WATCH the browser - clicking "Download"!');
         
         let downloadClicked = false;
         
+        // Get all download buttons and click the first one (720p)
         try {
             const downloadButtons = await page.$$('button.table__result-download');
             if (downloadButtons.length > 0) {
+                // Click the first download button (usually 720p)
                 await downloadButtons[0].click();
                 console.log(`✅ Clicked first "Download" button! (${downloadButtons.length} found)`);
                 downloadClicked = true;
@@ -307,6 +311,7 @@ async function getDownloadUrl(videoId, quality = '720p') {
             console.log('⚠️  Method 1 failed:', e.message);
         }
         
+        // Fallback: find by text
         if (!downloadClicked) {
             try {
                 const buttons = await page.$$('button');
@@ -329,7 +334,7 @@ async function getDownloadUrl(videoId, quality = '720p') {
         }
         
         // ============================================================
-        // ⏰ WAIT 5 SECONDS
+        // ⏰ WAIT 5 SECONDS FOR "Download video" BUTTON TO APPEAR
         // ============================================================
         console.log('⏳ WAITING 5 seconds for "Download video" button to appear...');
         await page.waitForTimeout(5000);
@@ -338,20 +343,23 @@ async function getDownloadUrl(videoId, quality = '720p') {
         // STEP 8: CLICK THE "Download video" BUTTON
         // ============================================================
         console.log('📌 Looking for "Download video" button...');
+        console.log('👀 WATCH the browser - this will trigger the actual download!');
         
         let downloadVideoClicked = false;
         
+        // Method 1: Using getByRole
         try {
             const downloadVideoBtn = page.getByRole('button', { name: 'Download video' });
             if (await downloadVideoBtn.isVisible({ timeout: 3000 })) {
                 await downloadVideoBtn.click();
-                console.log('✅ Clicked "Download video" button by role!');
+                console.log('✅ Clicked "Download video" button by role! - CHECK NETWORK!');
                 downloadVideoClicked = true;
             }
         } catch (e) {
             console.log('⚠️  Method 1 failed:', e.message);
         }
         
+        // Method 2: Find by text
         if (!downloadVideoClicked) {
             try {
                 const buttons = await page.$$('button');
@@ -369,6 +377,20 @@ async function getDownloadUrl(videoId, quality = '720p') {
             }
         }
         
+        // Method 3: Try as link
+        if (!downloadVideoClicked) {
+            try {
+                const downloadVideoBtn = page.getByRole('link', { name: 'Download video' });
+                if (await downloadVideoBtn.isVisible({ timeout: 2000 })) {
+                    await downloadVideoBtn.click();
+                    console.log('✅ Clicked "Download video" link!');
+                    downloadVideoClicked = true;
+                }
+            } catch (e) {
+                console.log('⚠️  Method 3 failed:', e.message);
+            }
+        }
+        
         if (!downloadVideoClicked) {
             console.log('⚠️  No "Download video" button found!');
         }
@@ -380,7 +402,7 @@ async function getDownloadUrl(videoId, quality = '720p') {
         await page.waitForTimeout(10000);
         
         // ============================================================
-        // STEP 10: GET VIDEO URL
+        // STEP 10: GET VIDEO URL FROM NETWORK OR HTML
         // ============================================================
         let downloadUrl = null;
         let selectedQuality = qualityText;
@@ -389,21 +411,29 @@ async function getDownloadUrl(videoId, quality = '720p') {
             downloadUrl = videoDownloadUrl;
             console.log(`✅ Video URL captured from network: ${downloadUrl.substring(0, 100)}...`);
         } else {
-            console.log('📌 No video URL captured, searching HTML...');
+            console.log('📌 No video URL captured from network, searching HTML...');
             
             const pageHtml = await page.content();
             
-            const sfMatches = pageHtml.match(/https?:\/\/[^\s"']*sf-converter\.com\/prod-new\/download[^\s"']*/gi);
-            if (sfMatches && sfMatches.length > 0) {
-                downloadUrl = sfMatches[0];
-                console.log(`✅ Found sf-converter URL in HTML: ${downloadUrl.substring(0, 80)}...`);
+            const mp4Matches = pageHtml.match(/https?:\/\/[^\s"']*\.mp4[^\s"']*/gi);
+            if (mp4Matches && mp4Matches.length > 0) {
+                downloadUrl = mp4Matches[0];
+                console.log(`✅ Found MP4 URL in HTML: ${downloadUrl.substring(0, 80)}...`);
             }
             
             if (!downloadUrl) {
-                const mp4Matches = pageHtml.match(/https?:\/\/[^\s"']*\.mp4[^\s"']*/gi);
-                if (mp4Matches && mp4Matches.length > 0) {
-                    downloadUrl = mp4Matches[0];
-                    console.log(`✅ Found MP4 URL in HTML: ${downloadUrl.substring(0, 80)}...`);
+                const sfMatches = pageHtml.match(/https?:\/\/[^\s"']*sf-converter\.com\/prod-new\/download[^\s"']*/gi);
+                if (sfMatches && sfMatches.length > 0) {
+                    downloadUrl = sfMatches[0];
+                    console.log(`✅ Found sf-converter URL in HTML: ${downloadUrl.substring(0, 80)}...`);
+                }
+            }
+            
+            if (!downloadUrl) {
+                const gvMatches = pageHtml.match(/https?:\/\/[^\s"']*googlevideo\.com[^\s"']*/gi);
+                if (gvMatches && gvMatches.length > 0) {
+                    downloadUrl = gvMatches[0];
+                    console.log(`✅ Found Google Video URL: ${downloadUrl.substring(0, 80)}...`);
                 }
             }
         }
@@ -421,6 +451,10 @@ async function getDownloadUrl(videoId, quality = '720p') {
         
         console.log(`📊 Video title: ${videoTitle}`);
         console.log(`📊 Download URL found: ${!!downloadUrl}`);
+        
+        // Keep browser open
+        console.log('⏳ Keeping browser open for 5 seconds...');
+        await page.waitForTimeout(5000);
         
         return {
             success: !!downloadUrl,
@@ -563,8 +597,8 @@ app.get('/api/health', (req, res) => {
         mode: 'Zeemo',
         downloadDir: DOWNLOAD_DIR,
         screenshotDir: SCREENSHOT_DIR,
-        environment: process.env.RENDER ? 'render' : 'local',
-        browserMode: 'headless',
+        environment: 'local',
+        browserMode: 'visible',
         timestamp: new Date().toISOString()
     });
 });
@@ -612,7 +646,7 @@ app.listen(PORT, () => {
     console.log('');
     console.log('🚀 YouTube Downloader Server running at http://localhost:' + PORT);
     console.log('🔗 Using: Zeemo.to');
-    console.log('👁️  Browser mode: HEADLESS');
+    console.log('👁️  Browser is VISIBLE - watch it work!');
     console.log('📌 POST /api/download - Download video');
     console.log('📌 GET  /api/health  - Health check');
     console.log('📌 GET  /api/files   - List downloaded files');
