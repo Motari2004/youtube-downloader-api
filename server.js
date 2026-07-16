@@ -11,19 +11,27 @@ app.use(cors());
 app.use(express.json());
 
 // ============================================================
-// DOWNLOAD LOCATION - Render Compatible
+// DOWNLOAD LOCATION
 // ============================================================
 
 const DOWNLOAD_DIR = process.env.RENDER 
     ? '/tmp/downloads' 
     : path.join(__dirname, 'downloads');
 
+const SCREENSHOT_DIR = process.env.RENDER 
+    ? '/tmp/screenshots' 
+    : path.join(__dirname, 'screenshots');
+
 if (!fs.existsSync(DOWNLOAD_DIR)) {
     fs.mkdirSync(DOWNLOAD_DIR, { recursive: true });
-    console.log(`📁 Created downloads folder: ${DOWNLOAD_DIR}`);
+}
+
+if (!fs.existsSync(SCREENSHOT_DIR)) {
+    fs.mkdirSync(SCREENSHOT_DIR, { recursive: true });
 }
 
 console.log(`📁 Downloads will be saved to: ${DOWNLOAD_DIR}`);
+console.log(`📸 Screenshots will be saved to: ${SCREENSHOT_DIR}`);
 
 // ============================================================
 // QUALITY MAPPING
@@ -40,16 +48,25 @@ const QUALITY_MAP = {
 };
 
 // ============================================================
-// FIND INPUT FIELD - MULTIPLE SELECTORS
+// FIND INPUT FIELD - MULTIPLE SELECTORS WITH SCREENSHOT
 // ============================================================
 
-async function findInputField(page) {
+async function findInputField(page, videoId) {
     console.log('📌 Waiting for input field...');
     
-    // Wait for page to stabilize
-    await page.waitForTimeout(2000);
+    await page.waitForTimeout(3000);
     
-    // Multiple selectors for input field
+    // Take screenshot of the page
+    const screenshotPath = path.join(SCREENSHOT_DIR, `${videoId}_page.png`);
+    await page.screenshot({ path: screenshotPath, fullPage: true });
+    console.log(`📸 Screenshot saved: ${screenshotPath}`);
+    
+    // Also get page HTML for debugging
+    const htmlPath = path.join(SCREENSHOT_DIR, `${videoId}_page.html`);
+    const htmlContent = await page.content();
+    fs.writeFileSync(htmlPath, htmlContent);
+    console.log(`📄 HTML saved: ${htmlPath}`);
+    
     const selectors = [
         '#url-input-wrapper',
         'input[type="text"]',
@@ -74,34 +91,26 @@ async function findInputField(page) {
             });
             if (input) {
                 console.log(`✅ Found input by: ${selector}`);
+                // Take screenshot of the input found
+                const foundPath = path.join(SCREENSHOT_DIR, `${videoId}_input_found.png`);
+                await page.screenshot({ path: foundPath });
+                console.log(`📸 Input found screenshot: ${foundPath}`);
                 return input;
             }
-        } catch (e) {
-            // Continue to next selector
-        }
+        } catch (e) {}
     }
     
-    // Try to find any visible input
-    try {
-        const inputs = await page.$$('input');
-        for (const input of inputs) {
-            const isVisible = await input.isVisible();
-            if (isVisible) {
-                const type = await input.getAttribute('type');
-                if (type === 'text' || type === 'url' || !type) {
-                    console.log('✅ Found visible text input');
-                    return input;
-                }
-            }
-        }
-    } catch (e) {}
+    // Take screenshot of failure
+    const failPath = path.join(SCREENSHOT_DIR, `${videoId}_input_not_found.png`);
+    await page.screenshot({ path: failPath });
+    console.log(`📸 Input not found screenshot: ${failPath}`);
     
     console.log('❌ All input selectors failed');
     return null;
 }
 
 // ============================================================
-// FIND DOWNLOAD ICON - MULTIPLE SELECTORS
+// FIND DOWNLOAD ICON
 // ============================================================
 
 async function findDownloadIcon(page) {
@@ -132,7 +141,7 @@ async function findDownloadIcon(page) {
 }
 
 // ============================================================
-// FIND DOWNLOAD BUTTON - MULTIPLE SELECTORS
+// FIND DOWNLOAD BUTTON
 // ============================================================
 
 async function findDownloadButton(page) {
@@ -159,7 +168,6 @@ async function findDownloadButton(page) {
         } catch (e) {}
     }
     
-    // Try to find any button with Download text
     try {
         const btns = await page.$$('button, a');
         for (const btn of btns) {
@@ -265,25 +273,7 @@ async function saveFile(url, filename) {
 }
 
 // ============================================================
-// WAIT FOR ELEMENTS TO LOAD
-// ============================================================
-
-async function waitForElementsToLoad(page) {
-    console.log('⏳ Waiting for page to fully load...');
-    await page.waitForTimeout(3000);
-    
-    try {
-        await page.waitForLoadState('networkidle', { timeout: 5000 });
-        console.log('✅ Network idle');
-    } catch (e) {
-        console.log('⚠️  Network not idle, continuing...');
-    }
-    
-    console.log('✅ Page is ready');
-}
-
-// ============================================================
-// GET DOWNLOAD URL - Render Compatible
+// GET DOWNLOAD URL - WITH SCREENSHOTS
 // ============================================================
 
 async function getDownloadUrl(videoId, quality = '720p') {
@@ -292,7 +282,6 @@ async function getDownloadUrl(videoId, quality = '720p') {
     
     const qualityText = QUALITY_MAP[quality] || '720P';
     
-    // Launch browser - Render optimized
     let context;
     try {
         context = await chromium.launchPersistentContext(
@@ -346,12 +335,18 @@ async function getDownloadUrl(videoId, quality = '720p') {
         });
         
         console.log('✅ Page loaded');
-        await waitForElementsToLoad(page);
+        
+        // Take screenshot of initial page
+        const initialScreenshot = path.join(SCREENSHOT_DIR, `${videoId}_initial.png`);
+        await page.screenshot({ path: initialScreenshot });
+        console.log(`📸 Initial screenshot: ${initialScreenshot}`);
+        
+        await page.waitForTimeout(3000);
         
         // ============================================================
         // STEP 2: ENTER URL
         // ============================================================
-        const inputField = await findInputField(page);
+        const inputField = await findInputField(page, videoId);
         
         if (inputField) {
             await inputField.click();
@@ -373,11 +368,21 @@ async function getDownloadUrl(videoId, quality = '720p') {
             console.log('⚠️  Download icon not found, continuing...');
         }
         
+        // Take screenshot after clicking
+        const afterClickScreenshot = path.join(SCREENSHOT_DIR, `${videoId}_after_click.png`);
+        await page.screenshot({ path: afterClickScreenshot });
+        console.log(`📸 After click screenshot: ${afterClickScreenshot}`);
+        
         // ============================================================
         // STEP 4: WAIT FOR RESULTS
         // ============================================================
         console.log('⏳ Waiting 8 seconds for results...');
         await page.waitForTimeout(8000);
+        
+        // Take screenshot of results
+        const resultsScreenshot = path.join(SCREENSHOT_DIR, `${videoId}_results.png`);
+        await page.screenshot({ path: resultsScreenshot });
+        console.log(`📸 Results screenshot: ${resultsScreenshot}`);
         
         console.log('📌 Waiting for quality options...');
         try {
@@ -460,6 +465,11 @@ async function getDownloadUrl(videoId, quality = '720p') {
             console.log('⚠️  Download button not found');
         }
         
+        // Take screenshot before closing
+        const finalScreenshot = path.join(SCREENSHOT_DIR, `${videoId}_final.png`);
+        await page.screenshot({ path: finalScreenshot });
+        console.log(`📸 Final screenshot: ${finalScreenshot}`);
+        
         // ============================================================
         // STEP 8: WAIT FOR NETWORK
         // ============================================================
@@ -507,7 +517,8 @@ async function getDownloadUrl(videoId, quality = '720p') {
         title: videoTitle || 'video',
         quality: quality,
         videoId: videoId,
-        selectedQuality: selectedQuality
+        selectedQuality: selectedQuality,
+        screenshots: SCREENSHOT_DIR
     };
 }
 
@@ -548,11 +559,46 @@ app.post('/api/download', async (req, res) => {
     }
 });
 
+// ============================================================
+// VIEW SCREENSHOTS ENDPOINT
+// ============================================================
+
+app.get('/api/screenshots', (req, res) => {
+    try {
+        const files = fs.readdirSync(SCREENSHOT_DIR);
+        const screenshotFiles = files.filter(f => f.endsWith('.png') || f.endsWith('.html'));
+        res.json({
+            success: true,
+            screenshots: screenshotFiles,
+            count: screenshotFiles.length,
+            directory: SCREENSHOT_DIR
+        });
+    } catch (error) {
+        res.status(500).json({ error: error.message });
+    }
+});
+
+// ============================================================
+// SERVE SCREENSHOTS
+// ============================================================
+
+app.get('/api/screenshot/:filename', (req, res) => {
+    const filename = req.params.filename;
+    const filePath = path.join(SCREENSHOT_DIR, filename);
+    
+    if (!fs.existsSync(filePath)) {
+        return res.status(404).json({ error: 'File not found' });
+    }
+    
+    res.sendFile(filePath);
+});
+
 app.get('/api/health', (req, res) => {
     res.json({
         status: 'running',
         mode: 'Vidssave Automation',
         downloadDir: DOWNLOAD_DIR,
+        screenshotDir: SCREENSHOT_DIR,
         environment: process.env.RENDER ? 'render' : 'local',
         timestamp: new Date().toISOString()
     });
@@ -576,6 +622,7 @@ app.get('/api/check', (req, res) => {
     res.json({
         status: 'ready',
         downloadDir: DOWNLOAD_DIR,
+        screenshotDir: SCREENSHOT_DIR,
         environment: process.env.RENDER ? 'render' : 'local'
     });
 });
@@ -585,7 +632,9 @@ app.listen(PORT, () => {
     console.log(`📌 POST /api/download - Download video`);
     console.log(`📌 GET  /api/health  - Health check`);
     console.log(`📌 GET  /api/files   - List downloaded files`);
+    console.log(`📌 GET  /api/screenshots - List screenshots`);
+    console.log(`📌 GET  /api/screenshot/:filename - View screenshot`);
     console.log('');
     console.log(`📁 Download location: ${DOWNLOAD_DIR}`);
-    console.log(`☁️  Environment: ${process.env.RENDER ? 'Render' : 'Local'}`);
+    console.log(`📸 Screenshot location: ${SCREENSHOT_DIR}`);
 });
