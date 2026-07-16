@@ -62,7 +62,7 @@ async function getDownloadUrl(videoId, quality = '720p') {
         console.log('🚀 Launching browser...');
         
         browser = await chromium.launch({
-            headless: true,  // 👈 MUST be true on Render
+            headless: true,
             slowMo: 50,
             args: [
                 '--no-sandbox',
@@ -71,7 +71,9 @@ async function getDownloadUrl(videoId, quality = '720p') {
                 '--disable-gpu',
                 '--disable-blink-features=AutomationControlled',
                 '--disable-features=IsolateOrigins,site-per-process',
-                '--window-size=1920,1080'
+                '--window-size=1920,1080',
+                '--disable-web-security',
+                '--disable-features=BlockInsecurePrivateNetworkRequests'
             ]
         });
         
@@ -79,15 +81,35 @@ async function getDownloadUrl(videoId, quality = '720p') {
             viewport: { width: 1920, height: 1080 },
             screen: { width: 1920, height: 1080 },
             userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-            locale: 'en-US'
+            locale: 'en-US',
+            timezoneId: 'America/New_York',
+            deviceScaleFactor: 1,
+            hasTouch: false,
+            isMobile: false,
+            extraHTTPHeaders: {
+                'Accept-Language': 'en-US,en;q=0.9'
+            }
         });
         
         const page = await context.newPage();
         
+        // Enhanced stealth script
         await page.addInitScript(() => {
             Object.defineProperty(navigator, 'webdriver', {
                 get: () => undefined
             });
+            Object.defineProperty(navigator, 'plugins', {
+                get: () => [1, 2, 3, 4, 5]
+            });
+            Object.defineProperty(navigator, 'languages', {
+                get: () => ['en-US', 'en']
+            });
+            window.chrome = {
+                runtime: {},
+                loadTimes: function() {},
+                csi: function() {},
+                app: {}
+            };
         });
         
         await page.setViewportSize({ width: 1920, height: 1080 });
@@ -99,20 +121,30 @@ async function getDownloadUrl(videoId, quality = '720p') {
         // ============================================================
         console.log('📌 Opening CutYT...');
         await page.goto('https://www.cutyt.com/', {
-            waitUntil: 'domcontentloaded',
+            waitUntil: 'networkidle',
             timeout: 60000
         });
         
         console.log('✅ Page loaded');
         await page.waitForTimeout(3000);
         
+        // Save screenshot for debugging
+        try {
+            const screenshotPath = path.join(SCREENSHOT_DIR, `${videoId}_page.png`);
+            await page.screenshot({ path: screenshotPath, fullPage: true });
+            console.log(`📸 Screenshot saved: ${screenshotPath}`);
+        } catch (e) {
+            console.log('⚠️  Could not save screenshot');
+        }
+        
         // ============================================================
-        // STEP 2: FIND INPUT FIELD
+        // STEP 2: FIND INPUT FIELD - MULTIPLE METHODS
         // ============================================================
         console.log('📌 Looking for input field...');
         
         await page.waitForTimeout(2000);
         
+        // Try multiple selectors
         const inputSelectors = [
             'input[type="url"]',
             'input[type="text"]',
@@ -124,32 +156,89 @@ async function getDownloadUrl(videoId, quality = '720p') {
             '.url-input',
             'textarea',
             'input[class*="input"]',
-            'input[class*="search"]'
+            'input[class*="search"]',
+            'input[class*="form"]',
+            '#url-input',
+            '#link-input',
+            '.form-control'
         ];
         
         let inputField = null;
+        let foundSelector = '';
+        
         for (const selector of inputSelectors) {
             try {
                 const el = await page.$(selector);
-                if (el && await el.isVisible()) {
-                    inputField = el;
-                    console.log(`✅ Found input by: ${selector}`);
-                    break;
+                if (el) {
+                    const isVisible = await el.isVisible();
+                    if (isVisible) {
+                        inputField = el;
+                        foundSelector = selector;
+                        console.log(`✅ Found input by: ${selector}`);
+                        break;
+                    }
                 }
             } catch (e) {}
         }
         
+        // Try by placeholder text
+        if (!inputField) {
+            try {
+                const placeholderTexts = ['Paste', 'paste', 'link', 'URL', 'url'];
+                for (const text of placeholderTexts) {
+                    try {
+                        inputField = await page.getByPlaceholder(text);
+                        if (await inputField.isVisible({ timeout: 1000 })) {
+                            foundSelector = `placeholder: ${text}`;
+                            console.log(`✅ Found input by placeholder: "${text}"`);
+                            break;
+                        }
+                    } catch (e) {}
+                }
+            } catch (e) {}
+        }
+        
+        // Try by role
         if (!inputField) {
             try {
                 inputField = page.getByRole('textbox');
-                if (await inputField.isVisible({ timeout: 3000 })) {
+                if (await inputField.isVisible({ timeout: 2000 })) {
+                    foundSelector = 'role: textbox';
                     console.log('✅ Found input by role');
+                } else {
+                    inputField = null;
+                }
+            } catch (e) {}
+        }
+        
+        // Try to find any visible input
+        if (!inputField) {
+            try {
+                const inputs = await page.$$('input');
+                for (const el of inputs) {
+                    const isVisible = await el.isVisible();
+                    if (isVisible) {
+                        const type = await el.getAttribute('type');
+                        if (type === 'text' || type === 'url' || !type) {
+                            inputField = el;
+                            foundSelector = 'any visible input';
+                            console.log('✅ Found any visible input');
+                            break;
+                        }
+                    }
                 }
             } catch (e) {}
         }
         
         if (!inputField) {
             console.log('❌ Input field not found');
+            // Save HTML for debugging
+            try {
+                const htmlPath = path.join(SCREENSHOT_DIR, `${videoId}_page.html`);
+                const html = await page.content();
+                fs.writeFileSync(htmlPath, html);
+                console.log(`📄 HTML saved: ${htmlPath}`);
+            } catch (e) {}
             return { success: false, error: 'Input field not found' };
         }
         
@@ -172,6 +261,7 @@ async function getDownloadUrl(videoId, quality = '720p') {
         
         let startClicked = false;
         
+        // Try by role
         try {
             const startButton = page.getByRole('button', { name: 'Start' });
             if (await startButton.isVisible({ timeout: 3000 })) {
@@ -180,15 +270,16 @@ async function getDownloadUrl(videoId, quality = '720p') {
                 startClicked = true;
             }
         } catch (e) {
-            console.log('⚠️  Method 1 failed:', e.message);
+            console.log('⚠️  Role method failed:', e.message);
         }
         
+        // Try by text
         if (!startClicked) {
             try {
                 const buttons = await page.$$('button');
                 for (const btn of buttons) {
                     const text = await btn.textContent();
-                    if (text && text.trim() === 'Start') {
+                    if (text && (text.trim() === 'Start' || text.includes('Start'))) {
                         await btn.click();
                         console.log('✅ Clicked "Start" button by text!');
                         startClicked = true;
@@ -196,8 +287,32 @@ async function getDownloadUrl(videoId, quality = '720p') {
                     }
                 }
             } catch (e) {
-                console.log('⚠️  Method 2 failed:', e.message);
+                console.log('⚠️  Text method failed:', e.message);
             }
+        }
+        
+        // Try by aria-label
+        if (!startClicked) {
+            try {
+                const startButton = page.getByLabel('Start');
+                if (await startButton.isVisible({ timeout: 2000 })) {
+                    await startButton.click();
+                    console.log('✅ Clicked "Start" button by aria-label!');
+                    startClicked = true;
+                }
+            } catch (e) {}
+        }
+        
+        // Try by class
+        if (!startClicked) {
+            try {
+                const startButton = await page.$('[class*="start"], [id*="start"], .btn-start, #start-btn');
+                if (startButton && await startButton.isVisible()) {
+                    await startButton.click();
+                    console.log('✅ Clicked "Start" button by class/id!');
+                    startClicked = true;
+                }
+            } catch (e) {}
         }
         
         if (!startClicked) {
@@ -218,6 +333,7 @@ async function getDownloadUrl(videoId, quality = '720p') {
         
         let mp4Clicked = false;
         
+        // Try by role
         try {
             const mp4Link = page.getByRole('link', { name: 'MP4' });
             if (await mp4Link.isVisible({ timeout: 3000 })) {
@@ -226,9 +342,10 @@ async function getDownloadUrl(videoId, quality = '720p') {
                 mp4Clicked = true;
             }
         } catch (e) {
-            console.log('⚠️  Method 1 failed:', e.message);
+            console.log('⚠️  Role method failed:', e.message);
         }
         
+        // Try by text
         if (!mp4Clicked) {
             try {
                 const links = await page.$$('a');
@@ -242,10 +359,11 @@ async function getDownloadUrl(videoId, quality = '720p') {
                     }
                 }
             } catch (e) {
-                console.log('⚠️  Method 2 failed:', e.message);
+                console.log('⚠️  Text method failed:', e.message);
             }
         }
         
+        // Try by href
         if (!mp4Clicked) {
             try {
                 const mp4Link = await page.$('a[href*="mp4"], a[href*="MP4"]');
@@ -255,7 +373,7 @@ async function getDownloadUrl(videoId, quality = '720p') {
                     mp4Clicked = true;
                 }
             } catch (e) {
-                console.log('⚠️  Method 3 failed:', e.message);
+                console.log('⚠️  Href method failed:', e.message);
             }
         }
         
@@ -264,7 +382,7 @@ async function getDownloadUrl(videoId, quality = '720p') {
         }
         
         // ============================================================
-        // ⏰ WAIT 60 SECONDS (1 MINUTE) AFTER CLICKING MP4
+        // ⏰ WAIT 60 SECONDS AFTER CLICKING MP4
         // ============================================================
         console.log('⏳ WAITING 60 SECONDS (1 minute) after clicking MP4...');
         await page.waitForTimeout(60000);
@@ -276,6 +394,7 @@ async function getDownloadUrl(videoId, quality = '720p') {
         
         let downloadNowClicked = false;
         
+        // Try by role
         try {
             const downloadNowBtn = page.getByRole('link', { name: 'Download MP4 now' });
             if (await downloadNowBtn.isVisible({ timeout: 3000 })) {
@@ -284,9 +403,10 @@ async function getDownloadUrl(videoId, quality = '720p') {
                 downloadNowClicked = true;
             }
         } catch (e) {
-            console.log('⚠️  Method 1 failed:', e.message);
+            console.log('⚠️  Role method failed:', e.message);
         }
         
+        // Try by text
         if (!downloadNowClicked) {
             try {
                 const links = await page.$$('a, button');
@@ -300,10 +420,11 @@ async function getDownloadUrl(videoId, quality = '720p') {
                     }
                 }
             } catch (e) {
-                console.log('⚠️  Method 2 failed:', e.message);
+                console.log('⚠️  Text method failed:', e.message);
             }
         }
         
+        // Try by class
         if (!downloadNowClicked) {
             try {
                 const downloadBtn = await page.$('[class*="download"], [id*="download"], .btn-download, #download-btn');
@@ -313,7 +434,7 @@ async function getDownloadUrl(videoId, quality = '720p') {
                     downloadNowClicked = true;
                 }
             } catch (e) {
-                console.log('⚠️  Method 4 failed:', e.message);
+                console.log('⚠️  Class method failed:', e.message);
             }
         }
         
@@ -582,4 +703,5 @@ app.listen(PORT, () => {
     console.log('📌 GET  /api/files   - List downloaded files');
     console.log('');
     console.log('📁 Download location: ' + DOWNLOAD_DIR);
+    console.log('📸 Screenshot location: ' + SCREENSHOT_DIR);
 });
