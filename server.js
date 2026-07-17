@@ -47,67 +47,7 @@ const QUALITY_MAP = {
 };
 
 // ============================================================
-// GET REAL VIDEO TITLE FROM YOUTUBE
-// ============================================================
-
-async function getYouTubeTitle(videoId) {
-    try {
-        const url = `https://www.youtube.com/watch?v=${videoId}`;
-        console.log(`📌 Fetching title from YouTube...`);
-        
-        // Use a simple fetch to get the page HTML
-        const response = await axios.get(url, {
-            headers: {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
-            },
-            timeout: 10000
-        });
-        
-        // Extract title from HTML
-        const html = response.data;
-        
-        // Method 1: Look for og:title meta tag
-        const ogTitleMatch = html.match(/<meta\s+property="og:title"\s+content="([^"]+)"/i);
-        if (ogTitleMatch && ogTitleMatch[1]) {
-            let title = ogTitleMatch[1];
-            // Clean up YouTube title
-            title = title.replace(/\s*[-|]\s*YouTube$/, '').trim();
-            console.log(`✅ Found title from og:title: ${title}`);
-            return title;
-        }
-        
-        // Method 2: Look for title tag
-        const titleMatch = html.match(/<title>([^<]+)<\/title>/i);
-        if (titleMatch && titleMatch[1]) {
-            let title = titleMatch[1];
-            title = title.replace(/\s*[-|]\s*YouTube$/, '').trim();
-            console.log(`✅ Found title from <title>: ${title}`);
-            return title;
-        }
-        
-        // Method 3: Look for json-ld structured data
-        const jsonLdMatch = html.match(/<script\s+type="application\/ld\+json">([^<]+)<\/script>/i);
-        if (jsonLdMatch && jsonLdMatch[1]) {
-            try {
-                const data = JSON.parse(jsonLdMatch[1]);
-                if (data && data.name) {
-                    console.log(`✅ Found title from JSON-LD: ${data.name}`);
-                    return data.name;
-                }
-            } catch (e) {}
-        }
-        
-        console.log(`⚠️  Could not find title, using videoId`);
-        return null;
-        
-    } catch (error) {
-        console.log(`⚠️  Error fetching title: ${error.message}`);
-        return null;
-    }
-}
-
-// ============================================================
-// GET DOWNLOAD URL - ZEEMO.TO
+// GET DOWNLOAD URL - ZEEMO.TO (WITH TITLE FROM h2)
 // ============================================================
 
 async function getDownloadUrl(videoId, quality = '720p') {
@@ -121,20 +61,6 @@ async function getDownloadUrl(videoId, quality = '720p') {
     let context;
     
     try {
-        // FIRST: Get the real video title from YouTube
-        let realTitle = await getYouTubeTitle(videoId);
-        if (!realTitle) {
-            realTitle = `video_${videoId}`;
-        }
-        
-        // Sanitize title for filename
-        const sanitizedTitle = realTitle
-            .replace(/[^a-zA-Z0-9 \-_]/g, '')  // Remove special chars except space, dash, underscore
-            .replace(/\s+/g, ' ')               // Collapse multiple spaces
-            .trim()
-            .substring(0, 100);                 // Limit length
-        
-        console.log(`📊 Real video title: ${sanitizedTitle}`);
         console.log('🚀 Launching browser...');
         
         browser = await chromium.launch({
@@ -302,6 +228,66 @@ async function getDownloadUrl(videoId, quality = '720p') {
         await page.waitForTimeout(5000);
         
         // ============================================================
+        // STEP 5.5: GET VIDEO TITLE FROM h2 HEADING
+        // ============================================================
+        let videoTitle = await page.evaluate(() => {
+            // Method 1: Find h2 heading with the video title
+            const h2Elements = document.querySelectorAll('h2');
+            for (const h2 of h2Elements) {
+                const text = h2.textContent.trim();
+                // Skip common unwanted text
+                if (text && 
+                    text.length > 0 && 
+                    text.length < 200 &&
+                    !text.includes('Download') &&
+                    !text.includes('Convert') &&
+                    !text.includes('YouTube') &&
+                    !text.includes('Free')) {
+                    return text;
+                }
+            }
+            
+            // Method 2: Try other selectors
+            const selectors = [
+                'h1',
+                '.title',
+                '[class*="title"]',
+                '.video-title',
+                '.filename',
+                '.video-name',
+                '.result-title'
+            ];
+            
+            for (const selector of selectors) {
+                const el = document.querySelector(selector);
+                if (el) {
+                    let title = el.textContent.trim();
+                    title = title.replace(/\s*[-|]\s*YouTube$/, '');
+                    title = title.replace(/^Free\s+YouTube\s+Video\s+Downloader\s*[-|]\s*/i, '');
+                    if (title && title.length > 0 && title.length < 200) {
+                        return title;
+                    }
+                }
+            }
+            return null;
+        });
+        
+        // If title not found, use videoId as fallback
+        if (!videoTitle || videoTitle.length === 0) {
+            console.log(`⚠️  Could not find real title, using videoId`);
+            videoTitle = `video_${videoId}`;
+        }
+        
+        // Sanitize title for filename
+        const sanitizedTitle = videoTitle
+            .replace(/[^a-zA-Z0-9 \-_]/g, '')  // Remove special chars except space, dash, underscore
+            .replace(/\s+/g, ' ')               // Collapse multiple spaces
+            .trim()
+            .substring(0, 100);                 // Limit length
+        
+        console.log(`📊 Video title: ${sanitizedTitle}`);
+        
+        // ============================================================
         // STEP 6: SET UP NETWORK INTERCEPTION
         // ============================================================
         console.log('📌 Setting up network interception...');
@@ -368,7 +354,7 @@ async function getDownloadUrl(videoId, quality = '720p') {
             return {
                 success: true,
                 downloadUrl: videoDownloadUrl,
-                title: sanitizedTitle,  // Use the REAL YouTube title
+                title: sanitizedTitle,
                 quality: quality,
                 videoId: videoId,
                 selectedQuality: qualityText,
@@ -386,7 +372,7 @@ async function getDownloadUrl(videoId, quality = '720p') {
             return {
                 success: true,
                 downloadUrl: videoDownloadUrl,
-                title: sanitizedTitle,  // Use the REAL YouTube title
+                title: sanitizedTitle,
                 quality: quality,
                 videoId: videoId,
                 selectedQuality: qualityText,
@@ -425,7 +411,7 @@ async function getDownloadUrl(videoId, quality = '720p') {
         return {
             success: !!downloadUrl,
             downloadUrl: downloadUrl || null,
-            title: sanitizedTitle,  // Use the REAL YouTube title
+            title: sanitizedTitle,
             quality: quality,
             videoId: videoId,
             selectedQuality: qualityText,
@@ -525,7 +511,6 @@ app.post('/api/download', async (req, res) => {
             });
         }
         
-        // Use the REAL video title from YouTube
         const filename = `${result.title}_${result.quality}.mp4`;
         await streamFile(result.downloadUrl, filename, res);
         
