@@ -402,7 +402,7 @@ async function getDownloadUrl(videoId, quality = '720p') {
 }
 
 // ============================================================
-// STREAM FILE DIRECTLY TO CLIENT - ONLY AFTER URL IS READY
+// STREAM FILE DIRECTLY TO CLIENT - WITH PROPER HEADERS
 // ============================================================
 
 async function streamFile(url, filename, res) {
@@ -414,12 +414,13 @@ async function streamFile(url, filename, res) {
     }
     
     try {
-        // Set headers for browser download
-        res.setHeader('Content-Disposition', `attachment; filename="${encodeURIComponent(filename)}"`);
+        // IMPORTANT: Set proper Content-Disposition header with the filename
+        // The filename MUST be URL-encoded for special characters
+        const encodedFilename = encodeURIComponent(filename);
+        res.setHeader('Content-Disposition', `attachment; filename="${encodedFilename}"; filename*=UTF-8''${encodedFilename}`);
         res.setHeader('Content-Type', 'video/mp4');
         res.setHeader('Content-Transfer-Encoding', 'binary');
         res.setHeader('Cache-Control', 'no-cache');
-        res.setHeader('Content-Length', '0'); // Will be updated by the stream
         
         const response = await axios({
             method: 'GET',
@@ -484,7 +485,6 @@ app.post('/api/download', async (req, res) => {
     }
     
     try {
-        // First, get the download URL (this may take time)
         const result = await getDownloadUrl(videoId, quality);
         
         if (!result.success || !result.downloadUrl) {
@@ -495,8 +495,7 @@ app.post('/api/download', async (req, res) => {
         }
         
         const filename = `${result.title}_${result.quality}.mp4`;
-        
-        // Now stream the file - browser will wait for this
+        console.log(`📁 Streaming with filename: ${filename}`);
         await streamFile(result.downloadUrl, filename, res);
         
     } catch (error) {
@@ -529,6 +528,7 @@ app.get('/api/download/:videoId', async (req, res) => {
         }
         
         const filename = `${result.title}_${result.quality}.mp4`;
+        console.log(`📁 Streaming with filename: ${filename}`);
         await streamFile(result.downloadUrl, filename, res);
         
     } catch (error) {
