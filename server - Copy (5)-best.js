@@ -47,67 +47,7 @@ const QUALITY_MAP = {
 };
 
 // ============================================================
-// GET REAL VIDEO TITLE FROM YOUTUBE
-// ============================================================
-
-async function getYouTubeTitle(videoId) {
-    try {
-        const url = `https://www.youtube.com/watch?v=${videoId}`;
-        console.log(`📌 Fetching title from YouTube...`);
-        
-        // Use a simple fetch to get the page HTML
-        const response = await axios.get(url, {
-            headers: {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
-            },
-            timeout: 10000
-        });
-        
-        // Extract title from HTML
-        const html = response.data;
-        
-        // Method 1: Look for og:title meta tag
-        const ogTitleMatch = html.match(/<meta\s+property="og:title"\s+content="([^"]+)"/i);
-        if (ogTitleMatch && ogTitleMatch[1]) {
-            let title = ogTitleMatch[1];
-            // Clean up YouTube title
-            title = title.replace(/\s*[-|]\s*YouTube$/, '').trim();
-            console.log(`✅ Found title from og:title: ${title}`);
-            return title;
-        }
-        
-        // Method 2: Look for title tag
-        const titleMatch = html.match(/<title>([^<]+)<\/title>/i);
-        if (titleMatch && titleMatch[1]) {
-            let title = titleMatch[1];
-            title = title.replace(/\s*[-|]\s*YouTube$/, '').trim();
-            console.log(`✅ Found title from <title>: ${title}`);
-            return title;
-        }
-        
-        // Method 3: Look for json-ld structured data
-        const jsonLdMatch = html.match(/<script\s+type="application\/ld\+json">([^<]+)<\/script>/i);
-        if (jsonLdMatch && jsonLdMatch[1]) {
-            try {
-                const data = JSON.parse(jsonLdMatch[1]);
-                if (data && data.name) {
-                    console.log(`✅ Found title from JSON-LD: ${data.name}`);
-                    return data.name;
-                }
-            } catch (e) {}
-        }
-        
-        console.log(`⚠️  Could not find title, using videoId`);
-        return null;
-        
-    } catch (error) {
-        console.log(`⚠️  Error fetching title: ${error.message}`);
-        return null;
-    }
-}
-
-// ============================================================
-// GET DOWNLOAD URL - ZEEMO.TO
+// GET DOWNLOAD URL - ZEEMO.TO (FULLY HEADLESS FOR RENDER)
 // ============================================================
 
 async function getDownloadUrl(videoId, quality = '720p') {
@@ -121,24 +61,13 @@ async function getDownloadUrl(videoId, quality = '720p') {
     let context;
     
     try {
-        // FIRST: Get the real video title from YouTube
-        let realTitle = await getYouTubeTitle(videoId);
-        if (!realTitle) {
-            realTitle = `video_${videoId}`;
-        }
+        console.log('🚀 Launching browser (HEADLESS for Render)...');
         
-        // Sanitize title for filename
-        const sanitizedTitle = realTitle
-            .replace(/[^a-zA-Z0-9 \-_]/g, '')  // Remove special chars except space, dash, underscore
-            .replace(/\s+/g, ' ')               // Collapse multiple spaces
-            .trim()
-            .substring(0, 100);                 // Limit length
-        
-        console.log(`📊 Real video title: ${sanitizedTitle}`);
-        console.log('🚀 Launching browser...');
+        // ALWAYS headless on Render, visible only locally
+        const isHeadless = true; // Always headless for Render compatibility
         
         browser = await chromium.launch({
-            headless: true,
+            headless: true,  // 👈 ALWAYS HEADLESS FOR RENDER
             slowMo: 50,
             args: [
                 '--no-sandbox',
@@ -365,10 +294,15 @@ async function getDownloadUrl(videoId, quality = '720p') {
         
         if (videoDownloadUrl && videoDownloadUrl.includes('googlevideo.com')) {
             console.log('✅ Direct download detected!');
+            let videoTitle = await page.evaluate(() => {
+                const titleEl = document.querySelector('h1, .title, [class*="title"]');
+                return titleEl ? titleEl.textContent.trim().replace(/[^a-zA-Z0-9]/g, '_').substring(0, 50) : 'video';
+            });
+            
             return {
                 success: true,
                 downloadUrl: videoDownloadUrl,
-                title: sanitizedTitle,  // Use the REAL YouTube title
+                title: videoTitle || 'video',
                 quality: quality,
                 videoId: videoId,
                 selectedQuality: qualityText,
@@ -383,10 +317,15 @@ async function getDownloadUrl(videoId, quality = '720p') {
         await page.waitForTimeout(5000);
         
         if (videoDownloadUrl && videoDownloadUrl.includes('googlevideo.com')) {
+            let videoTitle = await page.evaluate(() => {
+                const titleEl = document.querySelector('h1, .title, [class*="title"]');
+                return titleEl ? titleEl.textContent.trim().replace(/[^a-zA-Z0-9]/g, '_').substring(0, 50) : 'video';
+            });
+            
             return {
                 success: true,
                 downloadUrl: videoDownloadUrl,
-                title: sanitizedTitle,  // Use the REAL YouTube title
+                title: videoTitle || 'video',
                 quality: quality,
                 videoId: videoId,
                 selectedQuality: qualityText,
@@ -420,12 +359,18 @@ async function getDownloadUrl(videoId, quality = '720p') {
             }
         }
         
+        let videoTitle = await page.evaluate(() => {
+            const titleEl = document.querySelector('h1, .title, [class*="title"]');
+            return titleEl ? titleEl.textContent.trim().replace(/[^a-zA-Z0-9]/g, '_').substring(0, 50) : 'video';
+        });
+        
+        console.log(`📊 Video title: ${videoTitle}`);
         console.log(`📊 Download URL found: ${!!downloadUrl}`);
         
         return {
             success: !!downloadUrl,
             downloadUrl: downloadUrl || null,
-            title: sanitizedTitle,  // Use the REAL YouTube title
+            title: videoTitle || 'video',
             quality: quality,
             videoId: videoId,
             selectedQuality: qualityText,
@@ -444,7 +389,7 @@ async function getDownloadUrl(videoId, quality = '720p') {
 }
 
 // ============================================================
-// STREAM FILE DIRECTLY TO CLIENT
+// STREAM FILE DIRECTLY TO CLIENT (BROWSER DOWNLOAD)
 // ============================================================
 
 async function streamFile(url, filename, res) {
@@ -525,8 +470,7 @@ app.post('/api/download', async (req, res) => {
             });
         }
         
-        // Use the REAL video title from YouTube
-        const filename = `${result.title}_${result.quality}.mp4`;
+        const filename = `${result.title}_${result.quality}_${videoId}.mp4`;
         await streamFile(result.downloadUrl, filename, res);
         
     } catch (error) {
@@ -558,7 +502,7 @@ app.get('/api/download/:videoId', async (req, res) => {
             });
         }
         
-        const filename = `${result.title}_${result.quality}.mp4`;
+        const filename = `${result.title}_${result.quality}_${videoId}.mp4`;
         await streamFile(result.downloadUrl, filename, res);
         
     } catch (error) {
