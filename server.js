@@ -47,12 +47,6 @@ const QUALITY_MAP = {
 };
 
 // ============================================================
-// VIDEO CACHE - Store prepared videos
-// ============================================================
-
-const videoCache = new Map();
-
-// ============================================================
 // GET DOWNLOAD URL - ZEEMO.TO
 // ============================================================
 
@@ -408,7 +402,7 @@ async function getDownloadUrl(videoId, quality = '720p') {
 }
 
 // ============================================================
-// STREAM FILE DIRECTLY TO CLIENT
+// STREAM FILE DIRECTLY TO CLIENT - WITH PROPER HEADERS
 // ============================================================
 
 async function streamFile(url, filename, res) {
@@ -420,12 +414,14 @@ async function streamFile(url, filename, res) {
     }
     
     try {
+        // Set proper headers for download
         const encodedFilename = encodeURIComponent(filename);
         res.setHeader('Content-Disposition', `attachment; filename="${encodedFilename}"; filename*=UTF-8''${encodedFilename}`);
         res.setHeader('Content-Type', 'video/mp4');
         res.setHeader('Content-Transfer-Encoding', 'binary');
         res.setHeader('Cache-Control', 'no-cache');
         
+        // Make the request to get the video
         const response = await axios({
             method: 'GET',
             url: url,
@@ -438,17 +434,26 @@ async function streamFile(url, filename, res) {
             maxRedirects: 5
         });
         
+        // Get the content length - THIS IS IMPORTANT for Firefox to show progress
         let contentLength = response.headers['content-length'];
         let fileSize = contentLength ? parseInt(contentLength) : 0;
         
+        // If no content-length, try to get it from the URL or use a default
+        if (!fileSize || fileSize === 0) {
+            console.log('⚠️  No Content-Length header from source, file size unknown to browser');
+        }
+        
         console.log(`📊 File size: ${(fileSize / 1024 / 1024).toFixed(2)} MB`);
         
+        // Set Content-Length header so Firefox shows progress
         if (fileSize > 0) {
             res.setHeader('Content-Length', fileSize);
         } else {
+            // If we don't know the size, use chunked encoding
             res.setHeader('Transfer-Encoding', 'chunked');
         }
         
+        // Pipe the stream
         response.data.pipe(res);
         
         let downloaded = 0;
@@ -463,6 +468,7 @@ async function streamFile(url, filename, res) {
         response.data.on('end', () => {
             console.log('');
             console.log(`✅ Stream complete: ${filename}`);
+            console.log(`📊 Final size: ${(downloaded / 1024 / 1024).toFixed(2)} MB`);
         });
         
         response.data.on('error', (err) => {
@@ -481,75 +487,7 @@ async function streamFile(url, filename, res) {
 }
 
 // ============================================================
-// NEW: PREPARE ENDPOINT - Start processing video
-// ============================================================
-
-app.post('/api/prepare/:videoId', async (req, res) => {
-    const { videoId } = req.params;
-    const { quality = '720p' } = req.query;
-    
-    const cacheKey = `${videoId}_${quality}`;
-    
-    // Check if already cached
-    if (videoCache.has(cacheKey)) {
-        console.log(`📦 Video ${cacheKey} already in cache`);
-        return res.json({ success: true, cached: true, videoId, quality });
-    }
-    
-    try {
-        console.log(`📤 Preparing video: ${videoId} (${quality})`);
-        
-        // Start processing in the background
-        getDownloadUrl(videoId, quality).then(result => {
-            if (result.success && result.downloadUrl) {
-                videoCache.set(cacheKey, {
-                    url: result.downloadUrl,
-                    title: result.title,
-                    quality: result.quality,
-                    timestamp: Date.now()
-                });
-                console.log(`✅ Video ${cacheKey} prepared successfully`);
-            } else {
-                videoCache.set(cacheKey, { error: result.error || 'Failed to get video' });
-                console.log(`❌ Video ${cacheKey} preparation failed`);
-            }
-        }).catch(error => {
-            videoCache.set(cacheKey, { error: error.message });
-            console.log(`❌ Video ${cacheKey} preparation error:`, error.message);
-        });
-        
-        res.json({ success: true, processing: true, videoId, quality });
-        
-    } catch (error) {
-        console.error('❌ Prepare error:', error.message);
-        res.status(500).json({ success: false, error: error.message });
-    }
-});
-
-// ============================================================
-// NEW: STATUS ENDPOINT - Check if video is ready
-// ============================================================
-
-app.get('/api/status/:videoId', (req, res) => {
-    const { videoId } = req.params;
-    const { quality = '720p' } = req.query;
-    
-    const cacheKey = `${videoId}_${quality}`;
-    const cached = videoCache.get(cacheKey);
-    
-    if (cached) {
-        if (cached.error) {
-            res.json({ ready: false, error: cached.error });
-        } else {
-            res.json({ ready: true, url: cached.url, title: cached.title });
-        }
-    } else {
-        res.json({ ready: false });
-    }
-});
-
-// ============================================================
-// POST endpoint - for curl and programmatic use
+// API ENDPOINTS
 // ============================================================
 
 app.post('/api/download', async (req, res) => {
@@ -559,17 +497,6 @@ app.post('/api/download', async (req, res) => {
         return res.status(400).json({ error: 'videoId required' });
     }
     
-    const cacheKey = `${videoId}_${quality}`;
-    const cached = videoCache.get(cacheKey);
-    
-    if (cached && cached.url) {
-        console.log(`📦 Using cached video: ${cacheKey}`);
-        const filename = `${cached.title}_${cached.quality}.mp4`;
-        await streamFile(cached.url, filename, res);
-        videoCache.delete(cacheKey);
-        return;
-    }
-    
     try {
         const result = await getDownloadUrl(videoId, quality);
         
@@ -581,6 +508,7 @@ app.post('/api/download', async (req, res) => {
         }
         
         const filename = `${result.title}_${result.quality}.mp4`;
+        console.log(`📁 Streaming with filename: ${filename}`);
         await streamFile(result.downloadUrl, filename, res);
         
     } catch (error) {
@@ -593,28 +521,16 @@ app.post('/api/download', async (req, res) => {
         }
     }
 });
-
-// ============================================================
-// GET endpoint - for browser download
-// ============================================================
 
 app.get('/api/download/:videoId', async (req, res) => {
     const { videoId } = req.params;
     const { quality = '720p' } = req.query;
     
-    const cacheKey = `${videoId}_${quality}`;
-    const cached = videoCache.get(cacheKey);
-    
-    if (cached && cached.url) {
-        console.log(`📦 Using cached video: ${cacheKey}`);
-        const filename = `${cached.title}_${cached.quality}.mp4`;
-        await streamFile(cached.url, filename, res);
-        videoCache.delete(cacheKey);
-        return;
+    if (!videoId) {
+        return res.status(400).json({ error: 'videoId required' });
     }
     
     try {
-        console.log(`📤 Processing on-demand: ${videoId} (${quality})`);
         const result = await getDownloadUrl(videoId, quality);
         
         if (!result.success || !result.downloadUrl) {
@@ -625,6 +541,7 @@ app.get('/api/download/:videoId', async (req, res) => {
         }
         
         const filename = `${result.title}_${result.quality}.mp4`;
+        console.log(`📁 Streaming with filename: ${filename}`);
         await streamFile(result.downloadUrl, filename, res);
         
     } catch (error) {
@@ -637,10 +554,6 @@ app.get('/api/download/:videoId', async (req, res) => {
         }
     }
 });
-
-// ============================================================
-// HEALTH CHECK
-// ============================================================
 
 app.get('/api/health', (req, res) => {
     res.json({
@@ -648,7 +561,6 @@ app.get('/api/health', (req, res) => {
         mode: 'Zeemo (streaming)',
         environment: process.env.RENDER ? 'render' : 'local',
         browserMode: 'headless',
-        cacheSize: videoCache.size,
         timestamp: new Date().toISOString()
     });
 });
@@ -659,8 +571,6 @@ app.listen(PORT, () => {
     console.log('🔗 Using: Zeemo.to');
     console.log('📌 POST /api/download - Download video');
     console.log('📌 GET /api/download/:videoId - Browser download');
-    console.log('📌 POST /api/prepare/:videoId - Prepare video');
-    console.log('📌 GET /api/status/:videoId - Check video status');
     console.log('📌 GET /api/health - Health check');
     console.log('');
     console.log('📁 Temp directory: ' + TEMP_DIR);
