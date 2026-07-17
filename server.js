@@ -47,7 +47,7 @@ const QUALITY_MAP = {
 };
 
 // ============================================================
-// GET DOWNLOAD URL - ZEEMO.TO
+// GET DOWNLOAD URL - ZEEMO.TO (WITH TITLE FROM h2)
 // ============================================================
 
 async function getDownloadUrl(videoId, quality = '720p') {
@@ -222,16 +222,20 @@ async function getDownloadUrl(videoId, quality = '720p') {
         }
         
         // ============================================================
-        // STEP 5: WAIT FOR RESULTS & GET VIDEO TITLE FROM h2
+        // STEP 5: WAIT FOR RESULTS
         // ============================================================
         console.log('⏳ WAITING 5 seconds for results...');
         await page.waitForTimeout(5000);
         
-        // Get video title from h2 heading
+        // ============================================================
+        // STEP 5.5: GET VIDEO TITLE FROM h2 HEADING
+        // ============================================================
         let videoTitle = await page.evaluate(() => {
+            // Method 1: Find h2 heading with the video title
             const h2Elements = document.querySelectorAll('h2');
             for (const h2 of h2Elements) {
                 const text = h2.textContent.trim();
+                // Skip common unwanted text
                 if (text && 
                     text.length > 0 && 
                     text.length < 200 &&
@@ -242,18 +246,44 @@ async function getDownloadUrl(videoId, quality = '720p') {
                     return text;
                 }
             }
+            
+            // Method 2: Try other selectors
+            const selectors = [
+                'h1',
+                '.title',
+                '[class*="title"]',
+                '.video-title',
+                '.filename',
+                '.video-name',
+                '.result-title'
+            ];
+            
+            for (const selector of selectors) {
+                const el = document.querySelector(selector);
+                if (el) {
+                    let title = el.textContent.trim();
+                    title = title.replace(/\s*[-|]\s*YouTube$/, '');
+                    title = title.replace(/^Free\s+YouTube\s+Video\s+Downloader\s*[-|]\s*/i, '');
+                    if (title && title.length > 0 && title.length < 200) {
+                        return title;
+                    }
+                }
+            }
             return null;
         });
         
+        // If title not found, use videoId as fallback
         if (!videoTitle || videoTitle.length === 0) {
+            console.log(`⚠️  Could not find real title, using videoId`);
             videoTitle = `video_${videoId}`;
         }
         
+        // Sanitize title for filename
         const sanitizedTitle = videoTitle
-            .replace(/[^a-zA-Z0-9 \-_]/g, '')
-            .replace(/\s+/g, ' ')
+            .replace(/[^a-zA-Z0-9 \-_]/g, '')  // Remove special chars except space, dash, underscore
+            .replace(/\s+/g, ' ')               // Collapse multiple spaces
             .trim()
-            .substring(0, 100);
+            .substring(0, 100);                 // Limit length
         
         console.log(`📊 Video title: ${sanitizedTitle}`);
         
@@ -263,18 +293,16 @@ async function getDownloadUrl(videoId, quality = '720p') {
         console.log('📌 Setting up network interception...');
         
         let videoDownloadUrl = null;
-        let urlCaptured = false;
         
         context.on('response', async (response) => {
             const url = response.url();
-            if (!urlCaptured && url && (
+            if (url && (
                 url.includes('sf-converter.com/prod-new/download') ||
                 url.includes('googlevideo.com/videoplayback') ||
                 url.includes('.mp4')
             )) {
                 console.log(`🌐 Captured video URL`);
                 videoDownloadUrl = url;
-                urlCaptured = true;
             }
         });
         
@@ -402,7 +430,7 @@ async function getDownloadUrl(videoId, quality = '720p') {
 }
 
 // ============================================================
-// STREAM FILE DIRECTLY TO CLIENT - WITH PROPER HEADERS
+// STREAM FILE DIRECTLY TO CLIENT
 // ============================================================
 
 async function streamFile(url, filename, res) {
@@ -414,10 +442,7 @@ async function streamFile(url, filename, res) {
     }
     
     try {
-        // IMPORTANT: Set proper Content-Disposition header with the filename
-        // The filename MUST be URL-encoded for special characters
-        const encodedFilename = encodeURIComponent(filename);
-        res.setHeader('Content-Disposition', `attachment; filename="${encodedFilename}"; filename*=UTF-8''${encodedFilename}`);
+        res.setHeader('Content-Disposition', `attachment; filename="${encodeURIComponent(filename)}"`);
         res.setHeader('Content-Type', 'video/mp4');
         res.setHeader('Content-Transfer-Encoding', 'binary');
         res.setHeader('Cache-Control', 'no-cache');
@@ -430,21 +455,13 @@ async function streamFile(url, filename, res) {
                 'Referer': 'https://zeemo.to/',
                 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
             },
-            timeout: 120000,
-            maxRedirects: 5
+            timeout: 120000
         });
         
-        // Get the content length if available
-        const contentLength = response.headers['content-length'];
-        if (contentLength) {
-            res.setHeader('Content-Length', contentLength);
-        }
-        
-        // Pipe the stream directly to the response
         response.data.pipe(res);
         
         let downloaded = 0;
-        const total = parseInt(contentLength) || 0;
+        const total = parseInt(response.headers['content-length']) || 0;
         console.log(`📊 File size: ${(total / 1024 / 1024).toFixed(2)} MB`);
         
         response.data.on('data', (chunk) => {
@@ -495,7 +512,6 @@ app.post('/api/download', async (req, res) => {
         }
         
         const filename = `${result.title}_${result.quality}.mp4`;
-        console.log(`📁 Streaming with filename: ${filename}`);
         await streamFile(result.downloadUrl, filename, res);
         
     } catch (error) {
@@ -528,7 +544,6 @@ app.get('/api/download/:videoId', async (req, res) => {
         }
         
         const filename = `${result.title}_${result.quality}.mp4`;
-        console.log(`📁 Streaming with filename: ${filename}`);
         await streamFile(result.downloadUrl, filename, res);
         
     } catch (error) {
