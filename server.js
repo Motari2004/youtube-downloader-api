@@ -46,7 +46,7 @@ console.log(`📊 Max concurrent browsers: ${MAX_CONCURRENT_BROWSERS}`);
 console.log(`⏱️  Browser timeout: ${BROWSER_TIMEOUT}ms`);
 
 // ============================================================
-// QUALITY MAPPING
+// QUALITY MAPPING - ONLY DECLARED ONCE
 // ============================================================
 
 const QUALITY_MAP = {
@@ -123,18 +123,6 @@ function logNetwork(message, data = null) {
     }
     console.log(logMsg);
 }
-
-// ============================================================
-// QUALITY MAPPING
-// ============================================================
-
-const QUALITY_MAP = {
-    '1080p': '1080p',
-    '720p': '720p',
-    '480p': '480p',
-    '360p': '360p',
-    'best': '720p'
-};
 
 // ============================================================
 // BROWSER POOL
@@ -238,7 +226,7 @@ class BrowserPool {
 const browserPool = new BrowserPool(MAX_CONCURRENT_BROWSERS);
 
 // ============================================================
-// VIDEO CACHE WITH TTL
+// VIDEO CACHE
 // ============================================================
 
 class VideoCache {
@@ -301,7 +289,7 @@ class VideoCache {
 const videoCache = new VideoCache(MAX_CACHE_SIZE, CACHE_TTL);
 
 // ============================================================
-// GET VIDEO TITLE FROM NOEMBED API
+// GET VIDEO TITLE
 // ============================================================
 
 async function getVideoTitle(videoId) {
@@ -337,16 +325,10 @@ async function getVideoDownloadUrl(videoId, quality = '720p') {
     const startTime = Date.now();
     
     try {
-        // ============================================================
-        // STEP 1: Acquire browser
-        // ============================================================
         logStep('Step 1', 'Acquiring browser from pool');
         browser = await browserPool.acquire();
         logSuccess('Browser acquired');
         
-        // ============================================================
-        // STEP 2: Create context and page
-        // ============================================================
         logStep('Step 2', 'Creating browser context and page');
         context = await browser.newContext({
             viewport: { width: 1920, height: 1080 },
@@ -355,17 +337,11 @@ async function getVideoDownloadUrl(videoId, quality = '720p') {
         page = await context.newPage();
         logSuccess('Context and page created');
         
-        // ============================================================
-        // STEP 3: Navigate to Zeemo
-        // ============================================================
         logStep('Step 3', 'Navigating to Zeemo.to');
         await page.goto('https://zeemo.to/en2/', { waitUntil: 'networkidle', timeout: BROWSER_TIMEOUT });
         await page.waitForTimeout(2000);
         logSuccess('Page loaded', { elapsed: `${Date.now() - startTime}ms` });
         
-        // ============================================================
-        // STEP 4: Find input field
-        // ============================================================
         logStep('Step 4', 'Looking for input field');
         let inputField = null;
         try {
@@ -396,9 +372,6 @@ async function getVideoDownloadUrl(videoId, quality = '720p') {
             return { success: false, error: 'Input field not found' };
         }
         
-        // ============================================================
-        // STEP 5: Enter URL
-        // ============================================================
         logStep('Step 5', 'Entering YouTube URL', { url: `https://youtu.be/${videoId}` });
         const videoUrl = `https://youtu.be/${videoId}`;
         await inputField.click({ clickCount: 3 });
@@ -407,9 +380,6 @@ async function getVideoDownloadUrl(videoId, quality = '720p') {
         await page.waitForTimeout(500);
         logSuccess('URL entered');
         
-        // ============================================================
-        // STEP 6: Click Search
-        // ============================================================
         logStep('Step 6', 'Clicking Search button');
         try {
             const searchButton = page.getByRole('button', { name: 'Search' });
@@ -421,16 +391,10 @@ async function getVideoDownloadUrl(videoId, quality = '720p') {
             logWarning('Search button not found');
         }
         
-        // ============================================================
-        // STEP 7: Wait for results
-        // ============================================================
         logStep('Step 7', 'Waiting for results (5s)');
         await page.waitForTimeout(5000);
         logSuccess('Results loaded');
         
-        // ============================================================
-        // STEP 8: Get video title
-        // ============================================================
         logStep('Step 8', 'Extracting video title');
         let videoTitle = await page.evaluate(() => {
             const h2Elements = document.querySelectorAll('h2');
@@ -447,9 +411,6 @@ async function getVideoDownloadUrl(videoId, quality = '720p') {
         if (!videoTitle) videoTitle = `video_${videoId}`;
         logSuccess('Title extracted', { title: videoTitle });
         
-        // ============================================================
-        // STEP 9: Set up network interception
-        // ============================================================
         logStep('Step 9', 'Setting up network interception for video URL');
         let videoDownloadUrl = null;
         let urlCaptured = false;
@@ -467,9 +428,6 @@ async function getVideoDownloadUrl(videoId, quality = '720p') {
             }
         });
         
-        // ============================================================
-        // STEP 10: Find and click quality button
-        // ============================================================
         logStep('Step 10', `Finding quality button: ${qualityText}`);
         const rows = await page.$$('tr');
         let downloadClicked = false;
@@ -500,9 +458,6 @@ async function getVideoDownloadUrl(videoId, quality = '720p') {
             }
         }
         
-        // ============================================================
-        // STEP 11: Check for direct download
-        // ============================================================
         logStep('Step 11', 'Checking for direct download (3s)');
         await page.waitForTimeout(3000);
         
@@ -516,9 +471,6 @@ async function getVideoDownloadUrl(videoId, quality = '720p') {
             };
         }
         
-        // ============================================================
-        // STEP 12: Click "Download video" if needed
-        // ============================================================
         logStep('Step 12', 'Looking for "Download video" button (5s)');
         await page.waitForTimeout(5000);
         
@@ -534,9 +486,6 @@ async function getVideoDownloadUrl(videoId, quality = '720p') {
             logWarning('Error clicking "Download video"', { error: e.message });
         }
         
-        // ============================================================
-        // STEP 13: Final wait
-        // ============================================================
         logStep('Step 13', 'Final wait for network response (10s)');
         await page.waitForTimeout(10000);
         
@@ -597,16 +546,10 @@ async function getAudioDownloadUrl(videoId) {
     const startTime = Date.now();
     
     try {
-        // ============================================================
-        // STEP 1: Acquire browser
-        // ============================================================
         logStep('Step 1', 'Acquiring browser for audio');
         browser = await browserPool.acquire();
         logSuccess('Browser acquired for audio');
         
-        // ============================================================
-        // STEP 2: Create context and page
-        // ============================================================
         logStep('Step 2', 'Creating browser context and page for audio');
         context = await browser.newContext({
             viewport: { width: 1920, height: 1080 },
@@ -615,9 +558,6 @@ async function getAudioDownloadUrl(videoId) {
         page = await context.newPage();
         logSuccess('Context and page created for audio');
         
-        // ============================================================
-        // STEP 3: Set up network interception for MP3
-        // ============================================================
         logStep('Step 3', 'Setting up network interception for MP3');
         let mp3Url = null;
         
@@ -639,17 +579,11 @@ async function getAudioDownloadUrl(videoId) {
             }
         });
         
-        // ============================================================
-        // STEP 4: Navigate to Y2Mate
-        // ============================================================
         logStep('Step 4', 'Navigating to Y2Mate.gs');
         await page.goto('https://y2mate.gs/', { waitUntil: 'networkidle', timeout: BROWSER_TIMEOUT });
         await page.waitForTimeout(2000);
         logSuccess('Page loaded', { elapsed: `${Date.now() - startTime}ms` });
         
-        // ============================================================
-        // STEP 5: Find input field
-        // ============================================================
         logStep('Step 5', 'Looking for input field');
         let inputField = null;
         try {
@@ -684,9 +618,6 @@ async function getAudioDownloadUrl(videoId) {
             return { success: false, error: 'Input field not found' };
         }
         
-        // ============================================================
-        // STEP 6: Enter URL
-        // ============================================================
         logStep('Step 6', 'Entering YouTube URL for audio', { url: videoUrl });
         await inputField.click({ clickCount: 3 });
         await page.keyboard.press('Backspace');
@@ -694,9 +625,6 @@ async function getAudioDownloadUrl(videoId) {
         await page.waitForTimeout(500);
         logSuccess('URL entered for audio');
         
-        // ============================================================
-        // STEP 7: Click MP3 button
-        // ============================================================
         logStep('Step 7', 'Clicking MP3 button');
         let mp3Clicked = false;
         try {
@@ -724,9 +652,6 @@ async function getAudioDownloadUrl(videoId) {
             }
         }
         
-        // ============================================================
-        // STEP 8: Click Convert button
-        // ============================================================
         logStep('Step 8', 'Clicking Convert button');
         let convertClicked = false;
         try {
@@ -759,16 +684,10 @@ async function getAudioDownloadUrl(videoId) {
             await page.keyboard.press('Enter');
         }
         
-        // ============================================================
-        // STEP 9: Wait for conversion
-        // ============================================================
         logStep('Step 9', 'Waiting for conversion (8s)');
         await page.waitForTimeout(8000);
         logSuccess('Conversion wait complete');
         
-        // ============================================================
-        // STEP 10: Click Download button
-        // ============================================================
         logStep('Step 10', 'Clicking Download button');
         try {
             const downloadBtn = page.getByRole('button', { name: 'Download' });
@@ -782,9 +701,6 @@ async function getAudioDownloadUrl(videoId) {
         
         await page.waitForTimeout(3000);
         
-        // ============================================================
-        // STEP 11: Get video title
-        // ============================================================
         logStep('Step 11', 'Extracting audio title');
         let videoTitle = await page.evaluate(() => {
             const titleEl = document.querySelector('h1, .title, [class*="title"]');
@@ -795,9 +711,6 @@ async function getAudioDownloadUrl(videoId) {
         });
         logSuccess('Title extracted for audio', { title: videoTitle });
         
-        // ============================================================
-        // STEP 12: Find MP3 URL
-        // ============================================================
         if (!mp3Url) {
             logStep('Step 12', 'Searching HTML for MP3 URL');
             const pageHtml = await page.content();
@@ -910,7 +823,6 @@ async function streamFile(url, filename, res) {
 // API ENDPOINTS
 // ============================================================
 
-// Prepare endpoint
 app.post('/api/prepare/:videoId', async (req, res) => {
     const { videoId } = req.params;
     const { quality = '720p', type = 'video' } = req.query;
@@ -965,7 +877,6 @@ app.post('/api/prepare/:videoId', async (req, res) => {
     }
 });
 
-// Status endpoint
 app.get('/api/status/:videoId', (req, res) => {
     const { videoId } = req.params;
     const { quality = '720p', type = 'video' } = req.query;
@@ -985,7 +896,6 @@ app.get('/api/status/:videoId', (req, res) => {
     }
 });
 
-// Download endpoint - POST
 app.post('/api/download', async (req, res) => {
     const { videoId, quality = '720p', type = 'video' } = req.body;
     
@@ -1037,7 +947,6 @@ app.post('/api/download', async (req, res) => {
     }
 });
 
-// Download endpoint - GET
 app.get('/api/download/:videoId', async (req, res) => {
     const { videoId } = req.params;
     const { quality = '720p', type = 'video' } = req.query;
@@ -1085,7 +994,6 @@ app.get('/api/download/:videoId', async (req, res) => {
     }
 });
 
-// Pool stats endpoint
 app.get('/api/pool', (req, res) => {
     logStep('Pool Stats', 'Requested pool statistics');
     res.json({
@@ -1098,7 +1006,6 @@ app.get('/api/pool', (req, res) => {
     });
 });
 
-// Health check
 app.get('/api/health', (req, res) => {
     logStep('Health Check', 'Server health check');
     res.json({
