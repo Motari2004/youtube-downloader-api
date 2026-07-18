@@ -15,7 +15,7 @@ app.use(express.json({ limit: '10mb' }));
 // CONFIGURATION
 // ============================================================
 
-const MAX_CONCURRENT_BROWSERS = process.env.MAX_BROWSERS || 5; // 👈 Increased to 5
+const MAX_CONCURRENT_BROWSERS = process.env.MAX_BROWSERS || 5;
 const BROWSER_TIMEOUT = parseInt(process.env.BROWSER_TIMEOUT) || 60000;
 const CACHE_TTL = parseInt(process.env.CACHE_TTL) || 600000;
 const MAX_CACHE_SIZE = parseInt(process.env.MAX_CACHE_SIZE) || 100;
@@ -125,7 +125,7 @@ function logNetwork(message, data = null) {
 }
 
 // ============================================================
-// BROWSER POOL - Supports concurrent browsers
+// BROWSER POOL
 // ============================================================
 
 class BrowserPool {
@@ -339,7 +339,7 @@ async function getY2MateDownloadUrl(videoId, format = 'mp4', quality = '720p') {
         logSuccess('Context and page created');
         
         // ============================================================
-        // NETWORK INTERCEPTION - Capture ONLY download URLs
+        // NETWORK INTERCEPTION
         // ============================================================
         let downloadUrl = null;
         let urlCaptured = false;
@@ -522,7 +522,7 @@ async function getY2MateDownloadUrl(videoId, format = 'mp4', quality = '720p') {
         // ============================================================
         // STEP 10: Wait for the actual download URL
         // ============================================================
-        logStep('Step 10', 'Waiting for actual download URL (10s)');
+        logStep('Step 10', 'Waiting for actual download URL');
         let waitTime = 0;
         const maxWait = 10000;
         const checkInterval = 500;
@@ -532,14 +532,14 @@ async function getY2MateDownloadUrl(videoId, format = 'mp4', quality = '720p') {
             waitTime += checkInterval;
             
             if (waitTime % 2000 === 0) {
-                logStep('Step 10', `Still waiting for download URL... (${waitTime/1000}s)`);
+                logStep('Step 10', `Still waiting... (${waitTime/1000}s)`);
             }
         }
         
         if (urlCaptured) {
             logSuccess(`Download URL captured after ${waitTime}ms`);
         } else {
-            logWarning(`Download URL not captured after ${waitTime}ms, searching HTML`);
+            logWarning(`Download URL not captured, searching HTML`);
         }
         
         // ============================================================
@@ -647,11 +647,11 @@ async function getY2MateDownloadUrl(videoId, format = 'mp4', quality = '720p') {
 }
 
 // ============================================================
-// STREAM FILE - Non-blocking streaming
+// STREAM FILE - Non-blocking, independent streams
 // ============================================================
 
 async function streamFile(url, filename, res) {
-    logStep('Stream Start', `Streaming file: ${filename}`, { url: url.substring(0, 100) });
+    logStep('Stream Start', `Streaming: ${filename}`);
     
     if (!url) {
         logError('No URL provided for streaming');
@@ -665,7 +665,6 @@ async function streamFile(url, filename, res) {
         res.setHeader('Content-Type', filename.endsWith('.mp3') ? 'audio/mpeg' : 'video/mp4');
         res.setHeader('Content-Transfer-Encoding', 'binary');
         res.setHeader('Cache-Control', 'no-cache');
-        logStep('Stream Headers', 'Headers set', { filename });
         
         const response = await axios({
             method: 'GET',
@@ -684,16 +683,15 @@ async function streamFile(url, filename, res) {
         
         if (fileSize > 0) {
             res.setHeader('Content-Length', fileSize);
-            logStep('Stream Size', `File size: ${(fileSize / 1024 / 1024).toFixed(2)} MB`);
+            logStep('Stream Size', `${(fileSize / 1024 / 1024).toFixed(2)} MB`);
         } else {
             res.setHeader('Transfer-Encoding', 'chunked');
-            logStep('Stream Size', 'File size: unknown (chunked)');
         }
         
+        // Pipe the stream - this is non-blocking
         response.data.pipe(res);
         logSuccess('Stream started');
         
-        // Clean up when done
         response.data.on('end', () => {
             logSuccess('Stream complete', { filename });
         });
@@ -717,11 +715,10 @@ async function streamFile(url, filename, res) {
 // API ENDPOINTS - Fully concurrent
 // ============================================================
 
+// POST endpoint - for curl/API
 app.post('/api/download', async (req, res) => {
     const { videoId, quality = '720p', type = 'video' } = req.body;
     const format = type === 'audio' ? 'mp3' : 'mp4';
-    
-    logStep('Download Request', `Downloading ${format.toUpperCase()}`, { videoId, quality });
     
     if (!videoId) {
         logError('Missing videoId');
@@ -732,13 +729,14 @@ app.post('/api/download', async (req, res) => {
     const cached = videoCache.get(cacheKey);
     
     if (cached && cached.url) {
-        logSuccess('Using cached download', { cacheKey });
+        logSuccess('Cache hit, streaming immediately', { videoId });
         await streamFile(cached.url, cached.filename || `${cached.title || 'video'}.${format}`, res);
         videoCache.delete(cacheKey);
         return;
     }
     
     try {
+        logStep('Processing', `Getting ${format.toUpperCase()} for ${videoId}`);
         const result = await getY2MateDownloadUrl(videoId, format, quality);
         
         if (!result.success || !result.downloadUrl) {
@@ -749,6 +747,7 @@ app.post('/api/download', async (req, res) => {
             });
         }
         
+        // Cache the result for future requests
         videoCache.set(cacheKey, {
             url: result.downloadUrl,
             title: result.title,
@@ -758,7 +757,8 @@ app.post('/api/download', async (req, res) => {
             timestamp: Date.now()
         });
         
-        logSuccess('Download ready, streaming', { filename: result.filename });
+        // Stream immediately - non-blocking
+        logSuccess('Streaming', { filename: result.filename });
         await streamFile(result.downloadUrl, result.filename, res);
         
     } catch (error) {
@@ -769,24 +769,24 @@ app.post('/api/download', async (req, res) => {
     }
 });
 
+// GET endpoint - for browser
 app.get('/api/download/:videoId', async (req, res) => {
     const { videoId } = req.params;
     const { quality = '720p', type = 'video' } = req.query;
     const format = type === 'audio' ? 'mp3' : 'mp4';
     
-    logStep('Download Request (GET)', `Downloading ${format.toUpperCase()}`, { videoId, quality });
-    
     const cacheKey = `${videoId}_${quality}_${format}`;
     const cached = videoCache.get(cacheKey);
     
     if (cached && cached.url) {
-        logSuccess('Using cached download (GET)', { cacheKey });
+        logSuccess('Cache hit (GET), streaming immediately', { videoId });
         await streamFile(cached.url, cached.filename || `${cached.title || 'video'}.${format}`, res);
         videoCache.delete(cacheKey);
         return;
     }
     
     try {
+        logStep('Processing (GET)', `Getting ${format.toUpperCase()} for ${videoId}`);
         const result = await getY2MateDownloadUrl(videoId, format, quality);
         
         if (!result.success || !result.downloadUrl) {
@@ -806,7 +806,7 @@ app.get('/api/download/:videoId', async (req, res) => {
             timestamp: Date.now()
         });
         
-        logSuccess('Download ready, streaming (GET)', { filename: result.filename });
+        logSuccess('Streaming (GET)', { filename: result.filename });
         await streamFile(result.downloadUrl, result.filename, res);
         
     } catch (error) {
@@ -818,7 +818,6 @@ app.get('/api/download/:videoId', async (req, res) => {
 });
 
 app.get('/api/pool', (req, res) => {
-    logStep('Pool Stats', 'Requested pool statistics');
     res.json({
         pool: browserPool.getStats(),
         cache: {
@@ -830,7 +829,6 @@ app.get('/api/pool', (req, res) => {
 });
 
 app.get('/api/health', (req, res) => {
-    logStep('Health Check', 'Server health check');
     res.json({
         status: 'running',
         mode: 'Y2Mate.gs (MP4 + MP3)',
