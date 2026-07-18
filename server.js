@@ -9,7 +9,16 @@ const app = express();
 const PORT = process.env.PORT || 3003;
 
 app.use(cors());
-app.use(express.json());
+app.use(express.json({ limit: '10mb' }));
+
+// ============================================================
+// CONFIGURATION - SCALABLE FOR MANY USERS
+// ============================================================
+
+const MAX_CONCURRENT_BROWSERS = process.env.MAX_BROWSERS || 3;
+const BROWSER_TIMEOUT = parseInt(process.env.BROWSER_TIMEOUT) || 60000;
+const CACHE_TTL = parseInt(process.env.CACHE_TTL) || 600000; // 10 minutes
+const MAX_CACHE_SIZE = parseInt(process.env.MAX_CACHE_SIZE) || 100;
 
 // ============================================================
 // TEMP LOCATION
@@ -33,6 +42,8 @@ if (!fs.existsSync(SCREENSHOT_DIR)) {
 console.log(`📁 Temp directory: ${TEMP_DIR}`);
 console.log(`📸 Screenshots: ${SCREENSHOT_DIR}`);
 console.log(`👁️  Browser mode: ${process.env.RENDER ? 'HEADLESS' : 'VISIBLE'}`);
+console.log(`📊 Max concurrent browsers: ${MAX_CONCURRENT_BROWSERS}`);
+console.log(`⏱️  Browser timeout: ${BROWSER_TIMEOUT}ms`);
 
 // ============================================================
 // QUALITY MAPPING
@@ -47,10 +58,146 @@ const QUALITY_MAP = {
 };
 
 // ============================================================
-// VIDEO CACHE
+// BROWSER POOL - Reuse browsers for performance
 // ============================================================
 
-const videoCache = new Map();
+class BrowserPool {
+    constructor(maxSize = 3) {
+        this.maxSize = maxSize;
+        this.browsers = [];
+        this.queue = [];
+        this.activeCount = 0;
+    }
+
+    async acquire() {
+        return new Promise((resolve, reject) => {
+            // Try to get an available browser
+            const available = this.browsers.find(b => !b.inUse);
+            if (available) {
+                available.inUse = true;
+                this.activeCount++;
+                resolve(available.browser);
+                return;
+            }
+
+            // If we can create a new browser
+            if (this.browsers.length < this.maxSize) {
+                this.createBrowser().then(browser => {
+                    this.browsers.push({ browser, inUse: true });
+                    this.activeCount++;
+                    resolve(browser);
+                }).catch(reject);
+                return;
+            }
+
+            // Wait for a browser to become available
+            this.queue.push({ resolve, reject });
+        });
+    }
+
+    async createBrowser() {
+        console.log(`🔄 Creating new browser (${this.browsers.length + 1}/${this.maxSize})`);
+        return await chromium.launch({
+            headless: true,
+            slowMo: 30,
+            args: [
+                '--no-sandbox',
+                '--disable-setuid-sandbox',
+                '--disable-dev-shm-usage',
+                '--disable-gpu',
+                '--disable-blink-features=AutomationControlled',
+                '--disable-features=IsolateOrigins,site-per-process',
+                '--window-size=1920,1080'
+            ]
+        });
+    }
+
+    release(browser) {
+        const entry = this.browsers.find(b => b.browser === browser);
+        if (entry) {
+            entry.inUse = false;
+            this.activeCount--;
+            
+            // Resolve next waiting request
+            if (this.queue.length > 0) {
+                const next = this.queue.shift();
+                this.acquire().then(next.resolve).catch(next.reject);
+            }
+        }
+    }
+
+    async close() {
+        for (const entry of this.browsers) {
+            try { await entry.browser.close(); } catch (e) {}
+        }
+        this.browsers = [];
+        this.activeCount = 0;
+    }
+
+    getStats() {
+        return {
+            total: this.browsers.length,
+            active: this.activeCount,
+            waiting: this.queue.length,
+            max: this.maxSize
+        };
+    }
+}
+
+const browserPool = new BrowserPool(MAX_CONCURRENT_BROWSERS);
+
+// ============================================================
+// VIDEO CACHE WITH TTL
+// ============================================================
+
+class VideoCache {
+    constructor(maxSize = 100, ttl = 600000) {
+        this.cache = new Map();
+        this.maxSize = maxSize;
+        this.ttl = ttl;
+    }
+
+    set(key, value) {
+        // Clean if at max size
+        if (this.cache.size >= this.maxSize) {
+            const oldest = this.cache.keys().next().value;
+            this.cache.delete(oldest);
+        }
+        this.cache.set(key, {
+            value: value,
+            timestamp: Date.now()
+        });
+    }
+
+    get(key) {
+        const entry = this.cache.get(key);
+        if (!entry) return null;
+        
+        if (Date.now() - entry.timestamp > this.ttl) {
+            this.cache.delete(key);
+            return null;
+        }
+        return entry.value;
+    }
+
+    has(key) {
+        return this.get(key) !== null;
+    }
+
+    delete(key) {
+        this.cache.delete(key);
+    }
+
+    size() {
+        return this.cache.size;
+    }
+
+    clear() {
+        this.cache.clear();
+    }
+}
+
+const videoCache = new VideoCache(MAX_CACHE_SIZE, CACHE_TTL);
 
 // ============================================================
 // GET VIDEO TITLE FROM NOEMBED API
@@ -73,40 +220,31 @@ async function getVideoTitle(videoId) {
 }
 
 // ============================================================
-// ZEEMO.TO - VIDEO DOWNLOAD
+// ZEEMO.TO - VIDEO DOWNLOAD (WITH BROWSER POOL)
 // ============================================================
 
 async function getVideoDownloadUrl(videoId, quality = '720p') {
     console.log(`🎬 Getting video URL from Zeemo: ${videoId}`);
     
     const qualityText = QUALITY_MAP[quality] || '720p';
-    let browser;
-    let context;
+    let browser = null;
+    let context = null;
+    let page = null;
     
     try {
-        browser = await chromium.launch({
-            headless: true,
-            slowMo: 50,
-            args: [
-                '--no-sandbox',
-                '--disable-setuid-sandbox',
-                '--disable-dev-shm-usage',
-                '--disable-gpu',
-                '--disable-blink-features=AutomationControlled',
-                '--disable-features=IsolateOrigins,site-per-process',
-                '--window-size=1920,1080'
-            ]
-        });
+        // Acquire browser from pool
+        browser = await browserPool.acquire();
+        console.log(`🔒 Browser acquired (pool stats: ${JSON.stringify(browserPool.getStats())})`);
         
         context = await browser.newContext({
             viewport: { width: 1920, height: 1080 },
             userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
         });
         
-        const page = await context.newPage();
+        page = await context.newPage();
         
         // Navigate to Zeemo
-        await page.goto('https://zeemo.to/en2/', { waitUntil: 'networkidle', timeout: 60000 });
+        await page.goto('https://zeemo.to/en2/', { waitUntil: 'networkidle', timeout: BROWSER_TIMEOUT });
         await page.waitForTimeout(2000);
         
         // Find input field
@@ -250,42 +388,43 @@ async function getVideoDownloadUrl(videoId, quality = '720p') {
         console.error('❌ Video error:', error.message);
         return { success: false, error: error.message };
     } finally {
+        // Release resources back to pool
+        if (page) {
+            try { await page.close(); } catch (e) {}
+        }
+        if (context) {
+            try { await context.close(); } catch (e) {}
+        }
         if (browser) {
-            try { await browser.close(); } catch (e) {}
+            browserPool.release(browser);
+            console.log(`🔓 Browser released (pool stats: ${JSON.stringify(browserPool.getStats())})`);
         }
     }
 }
 
 // ============================================================
-// Y2MATE.GS - AUDIO DOWNLOAD
+// Y2MATE.GS - AUDIO DOWNLOAD (WITH BROWSER POOL)
 // ============================================================
 
 async function getAudioDownloadUrl(videoId) {
     console.log(`🎵 Getting audio URL from Y2Mate: ${videoId}`);
     
     const videoUrl = `https://youtu.be/${videoId}`;
-    let browser;
-    let context;
+    let browser = null;
+    let context = null;
+    let page = null;
     
     try {
-        browser = await chromium.launch({
-            headless: true,
-            slowMo: 50,
-            args: [
-                '--no-sandbox',
-                '--disable-setuid-sandbox',
-                '--disable-dev-shm-usage',
-                '--disable-gpu',
-                '--window-size=1920,1080'
-            ]
-        });
+        // Acquire browser from pool
+        browser = await browserPool.acquire();
+        console.log(`🔒 Browser acquired for audio (pool stats: ${JSON.stringify(browserPool.getStats())})`);
         
         context = await browser.newContext({
             viewport: { width: 1920, height: 1080 },
             userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
         });
         
-        const page = await context.newPage();
+        page = await context.newPage();
         
         // Set up network interception for MP3
         let mp3Url = null;
@@ -308,7 +447,7 @@ async function getAudioDownloadUrl(videoId) {
         });
         
         // Navigate to Y2Mate
-        await page.goto('https://y2mate.gs/', { waitUntil: 'networkidle', timeout: 60000 });
+        await page.goto('https://y2mate.gs/', { waitUntil: 'networkidle', timeout: BROWSER_TIMEOUT });
         await page.waitForTimeout(2000);
         
         // Find input field
@@ -440,14 +579,22 @@ async function getAudioDownloadUrl(videoId) {
         console.error('❌ Audio error:', error.message);
         return { success: false, error: error.message };
     } finally {
+        // Release resources back to pool
+        if (page) {
+            try { await page.close(); } catch (e) {}
+        }
+        if (context) {
+            try { await context.close(); } catch (e) {}
+        }
         if (browser) {
-            try { await browser.close(); } catch (e) {}
+            browserPool.release(browser);
+            console.log(`🔓 Browser released for audio (pool stats: ${JSON.stringify(browserPool.getStats())})`);
         }
     }
 }
 
 // ============================================================
-// STREAM FILE
+// STREAM FILE WITH PROGRESS
 // ============================================================
 
 async function streamFile(url, filename, res) {
@@ -503,7 +650,12 @@ app.post('/api/prepare/:videoId', async (req, res) => {
     const { quality = '720p', type = 'video' } = req.query;
     const cacheKey = `${videoId}_${quality}_${type}`;
     
-    if (videoCache.has(cacheKey)) {
+    // Check if already processing
+    const existing = videoCache.get(cacheKey);
+    if (existing) {
+        if (existing.error) {
+            return res.json({ success: false, error: existing.error, cached: true });
+        }
         return res.json({ success: true, cached: true, videoId, quality, type });
     }
     
@@ -517,7 +669,8 @@ app.post('/api/prepare/:videoId', async (req, res) => {
             processor = getVideoDownloadUrl(videoId, quality);
         }
         
-        processor.then(result => {
+        // Start processing and store promise reference
+        const promise = processor.then(result => {
             if (result.success && result.downloadUrl) {
                 videoCache.set(cacheKey, {
                     url: result.downloadUrl,
@@ -531,9 +684,11 @@ app.post('/api/prepare/:videoId', async (req, res) => {
                 videoCache.set(cacheKey, { error: result.error || 'Failed to get download URL' });
                 console.log(`❌ ${type} ${cacheKey} preparation failed`);
             }
+            return result;
         }).catch(error => {
             videoCache.set(cacheKey, { error: error.message });
             console.log(`❌ ${type} ${cacheKey} error:`, error.message);
+            return { success: false, error: error.message };
         });
         
         res.json({ success: true, processing: true, videoId, quality, type });
@@ -653,25 +808,61 @@ app.get('/api/download/:videoId', async (req, res) => {
     }
 });
 
+// Pool stats endpoint
+app.get('/api/pool', (req, res) => {
+    res.json({
+        pool: browserPool.getStats(),
+        cache: {
+            size: videoCache.size(),
+            maxSize: MAX_CACHE_SIZE,
+            ttl: CACHE_TTL
+        }
+    });
+});
+
 // Health check
 app.get('/api/health', (req, res) => {
     res.json({
         status: 'running',
         mode: 'Zeemo + Y2Mate',
         environment: process.env.RENDER ? 'render' : 'local',
-        cacheSize: videoCache.size,
+        cacheSize: videoCache.size(),
+        pool: browserPool.getStats(),
         timestamp: new Date().toISOString()
     });
 });
+
+// ============================================================
+// GRACEFUL SHUTDOWN
+// ============================================================
+
+process.on('SIGTERM', async () => {
+    console.log('🛑 Received SIGTERM, closing browser pool...');
+    await browserPool.close();
+    process.exit(0);
+});
+
+process.on('SIGINT', async () => {
+    console.log('🛑 Received SIGINT, closing browser pool...');
+    await browserPool.close();
+    process.exit(0);
+});
+
+// ============================================================
+// START SERVER
+// ============================================================
 
 app.listen(PORT, () => {
     console.log('');
     console.log('🚀 YouTube Downloader Server running on port ' + PORT);
     console.log('🔗 Using: Zeemo.to (Video) + Y2Mate.gs (Audio)');
+    console.log('📊 Browser Pool: ' + MAX_CONCURRENT_BROWSERS + ' concurrent browsers');
+    console.log('📊 Cache: ' + MAX_CACHE_SIZE + ' items, TTL: ' + (CACHE_TTL/60000) + ' minutes');
     console.log('📌 POST /api/download - Download video/audio');
     console.log('📌 GET /api/download/:videoId - Browser download');
     console.log('📌 POST /api/prepare/:videoId - Prepare video/audio');
     console.log('📌 GET /api/status/:videoId - Check status');
+    console.log('📌 GET /api/pool - Pool statistics');
     console.log('📌 GET /api/health - Health check');
     console.log('');
     console.log('📁 Temp directory: ' + TEMP_DIR);
