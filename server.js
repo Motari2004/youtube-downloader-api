@@ -339,7 +339,7 @@ async function getY2MateDownloadUrl(videoId, format = 'mp4', quality = '720p') {
         logSuccess('Context and page created');
         
         // ============================================================
-        // ENHANCED NETWORK INTERCEPTION - Capture etacloud.org URLs
+        // ENHANCED NETWORK INTERCEPTION - Capture ONLY download URLs
         // ============================================================
         let downloadUrl = null;
         let urlCaptured = false;
@@ -355,32 +355,30 @@ async function getY2MateDownloadUrl(videoId, format = 'mp4', quality = '720p') {
             }
             
             if (!urlCaptured && url) {
-                // Check for video/audio URLs - Updated patterns
-                const isVideo = format === 'mp4' && (
+                // ONLY capture actual download URLs (not auth, not progress)
+                const isDownloadUrl = (
+                    // Direct download URL patterns
+                    url.includes('/api/v1/download') ||
                     url.includes('.mp4') || 
-                    url.includes('googlevideo') ||
-                    url.includes('videoplayback') ||
-                    url.includes('etacloud.org') ||  // 👈 ADDED: Capture etacloud.org
-                    url.includes('coccoo.etacloud') ||  // 👈 ADDED
-                    url.includes('occcoc.etacloud') ||  // 👈 ADDED
-                    (url.includes('/api/v1/download') && url.includes('f=mp4'))  // 👈 ADDED
-                );
-                const isAudio = format === 'mp3' && (
-                    url.includes('.mp3') || 
-                    url.includes('audio') ||
-                    url.includes('download') ||
-                    (url.includes('/api/v1/download') && url.includes('f=mp3'))
+                    url.includes('.mp3') ||
+                    // Y2Mate specific
+                    (url.includes('etacloud.org') && url.includes('sig=') && url.includes('f='))
                 );
                 
-                if (isVideo || isAudio) {
-                    // Skip analytics/tracking
-                    if (!url.includes('google-analytics') && 
-                        !url.includes('analytics') && 
-                        !url.includes('tracking')) {
-                        downloadUrl = url;
-                        urlCaptured = true;
-                        logNetwork(`${format.toUpperCase()} URL captured`, { url: url.substring(0, 100) });
-                    }
+                // Skip auth, progress, init endpoints
+                const isExcluded = (
+                    url.includes('/auth') ||
+                    url.includes('/progress') ||
+                    url.includes('/init') ||
+                    url.includes('google-analytics') ||
+                    url.includes('analytics') ||
+                    url.includes('tracking')
+                );
+                
+                if (isDownloadUrl && !isExcluded) {
+                    downloadUrl = url;
+                    urlCaptured = true;
+                    logNetwork(`${format.toUpperCase()} DOWNLOAD URL captured`, { url: url.substring(0, 100) });
                 }
             }
         });
@@ -557,41 +555,43 @@ async function getY2MateDownloadUrl(videoId, format = 'mp4', quality = '720p') {
             logStep('Step 12', 'Searching HTML for download URL');
             const pageHtml = await page.content();
             
-            // Look for etacloud.org URLs (the ones we want)
-            const etacloudMatches = pageHtml.match(/https?:\/\/[^\s"']*etacloud\.org[^\s"']*/gi);
-            if (etacloudMatches && etacloudMatches.length > 0) {
-                // Filter to get the right format
-                for (const match of etacloudMatches) {
+            // Look for the specific download URL pattern
+            const downloadPattern = /https?:\/\/[^\s"']*etacloud\.org\/api\/v1\/download[^\s"']*f=(mp4|mp3)[^\s"']*/gi;
+            const matches = pageHtml.match(downloadPattern);
+            
+            if (matches && matches.length > 0) {
+                // Get the correct format
+                for (const match of matches) {
                     if (format === 'mp4' && match.includes('f=mp4')) {
                         downloadUrl = match;
-                        logSuccess(`Found MP4 URL in HTML (etacloud.org)`, { url: downloadUrl.substring(0, 100) });
+                        logSuccess(`Found ${format.toUpperCase()} download URL in HTML`, { url: downloadUrl.substring(0, 100) });
                         break;
                     } else if (format === 'mp3' && match.includes('f=mp3')) {
                         downloadUrl = match;
-                        logSuccess(`Found MP3 URL in HTML (etacloud.org)`, { url: downloadUrl.substring(0, 100) });
+                        logSuccess(`Found ${format.toUpperCase()} download URL in HTML`, { url: downloadUrl.substring(0, 100) });
                         break;
                     }
                 }
             }
             
-            // Fallback: look for any URL with the format
             if (!downloadUrl) {
-                const pattern = format === 'mp4' ? /https?:\/\/[^\s"']*\/api\/v1\/download[^\s"']*f=mp4[^\s"']*/gi : /https?:\/\/[^\s"']*\/api\/v1\/download[^\s"']*f=mp3[^\s"']*/gi;
-                const matches = pageHtml.match(pattern);
-                if (matches && matches.length > 0) {
-                    downloadUrl = matches[0];
-                    logSuccess(`Found ${format.toUpperCase()} URL in HTML (fallback)`, { url: downloadUrl.substring(0, 100) });
+                // Try to find any etacloud URL with download
+                const anyDownload = pageHtml.match(/https?:\/\/[^\s"']*etacloud\.org\/api\/v1\/download[^\s"']*/gi);
+                if (anyDownload && anyDownload.length > 0) {
+                    downloadUrl = anyDownload[0];
+                    logSuccess(`Found etacloud download URL (any)`, { url: downloadUrl.substring(0, 100) });
                 } else {
-                    // Try to find any etacloud URL
-                    const anyMatches = pageHtml.match(/https?:\/\/[^\s"']*etacloud\.org[^\s"']*/gi);
-                    if (anyMatches && anyMatches.length > 0) {
-                        downloadUrl = anyMatches[0];
-                        logSuccess(`Found etacloud.org URL in HTML (any)`, { url: downloadUrl.substring(0, 100) });
-                    } else {
-                        logWarning(`No ${format.toUpperCase()} URL found in HTML`);
-                    }
+                    logWarning(`No ${format.toUpperCase()} download URL found in HTML`);
                 }
             }
+        }
+        
+        // ============================================================
+        // STEP 13: Validate the download URL (not auth/progress)
+        // ============================================================
+        if (downloadUrl && (downloadUrl.includes('/auth') || downloadUrl.includes('/progress') || downloadUrl.includes('/init'))) {
+            logWarning(`Download URL looks like auth/progress, ignoring`, { url: downloadUrl.substring(0, 100) });
+            downloadUrl = null;
         }
         
         const totalTime = Date.now() - startTime;
@@ -714,10 +714,16 @@ app.post('/api/download', async (req, res) => {
     const cached = videoCache.get(cacheKey);
     
     if (cached && cached.url) {
-        logSuccess('Using cached download', { cacheKey });
-        await streamFile(cached.url, cached.filename || `${cached.title || 'video'}.${format}`, res);
-        videoCache.delete(cacheKey);
-        return;
+        // Validate cached URL is not auth/progress
+        if (!cached.url.includes('/auth') && !cached.url.includes('/progress')) {
+            logSuccess('Using cached download', { cacheKey });
+            await streamFile(cached.url, cached.filename || `${cached.title || 'video'}.${format}`, res);
+            videoCache.delete(cacheKey);
+            return;
+        } else {
+            logWarning('Cached URL is auth/progress, removing', { cacheKey });
+            videoCache.delete(cacheKey);
+        }
     }
     
     try {
@@ -728,6 +734,15 @@ app.post('/api/download', async (req, res) => {
             return res.status(404).json({ 
                 success: false, 
                 error: result.error || 'Could not get download URL' 
+            });
+        }
+        
+        // Validate URL is not auth/progress
+        if (result.downloadUrl.includes('/auth') || result.downloadUrl.includes('/progress')) {
+            logError('Invalid download URL (auth/progress)', { url: result.downloadUrl.substring(0, 100) });
+            return res.status(404).json({ 
+                success: false, 
+                error: 'Invalid download URL received' 
             });
         }
         
@@ -762,10 +777,14 @@ app.get('/api/download/:videoId', async (req, res) => {
     const cached = videoCache.get(cacheKey);
     
     if (cached && cached.url) {
-        logSuccess('Using cached download (GET)', { cacheKey });
-        await streamFile(cached.url, cached.filename || `${cached.title || 'video'}.${format}`, res);
-        videoCache.delete(cacheKey);
-        return;
+        if (!cached.url.includes('/auth') && !cached.url.includes('/progress')) {
+            logSuccess('Using cached download (GET)', { cacheKey });
+            await streamFile(cached.url, cached.filename || `${cached.title || 'video'}.${format}`, res);
+            videoCache.delete(cacheKey);
+            return;
+        } else {
+            videoCache.delete(cacheKey);
+        }
     }
     
     try {
@@ -776,6 +795,14 @@ app.get('/api/download/:videoId', async (req, res) => {
             return res.status(404).json({ 
                 success: false, 
                 error: result.error || 'Could not get download URL' 
+            });
+        }
+        
+        if (result.downloadUrl.includes('/auth') || result.downloadUrl.includes('/progress')) {
+            logError('Invalid download URL (auth/progress)', { url: result.downloadUrl.substring(0, 100) });
+            return res.status(404).json({ 
+                success: false, 
+                error: 'Invalid download URL received' 
             });
         }
         
