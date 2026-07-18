@@ -15,7 +15,7 @@ app.use(express.json({ limit: '10mb' }));
 // CONFIGURATION
 // ============================================================
 
-const MAX_CONCURRENT_BROWSERS = process.env.MAX_BROWSERS || 3;
+const MAX_CONCURRENT_BROWSERS = process.env.MAX_BROWSERS || 5; // 👈 Increased to 5
 const BROWSER_TIMEOUT = parseInt(process.env.BROWSER_TIMEOUT) || 60000;
 const CACHE_TTL = parseInt(process.env.CACHE_TTL) || 600000;
 const MAX_CACHE_SIZE = parseInt(process.env.MAX_CACHE_SIZE) || 100;
@@ -125,11 +125,11 @@ function logNetwork(message, data = null) {
 }
 
 // ============================================================
-// BROWSER POOL
+// BROWSER POOL - Supports concurrent browsers
 // ============================================================
 
 class BrowserPool {
-    constructor(maxSize = 3) {
+    constructor(maxSize = 5) {
         this.maxSize = maxSize;
         this.browsers = [];
         this.queue = [];
@@ -339,7 +339,7 @@ async function getY2MateDownloadUrl(videoId, format = 'mp4', quality = '720p') {
         logSuccess('Context and page created');
         
         // ============================================================
-        // NETWORK INTERCEPTION - Capture ONLY download URLs (NOT convert)
+        // NETWORK INTERCEPTION - Capture ONLY download URLs
         // ============================================================
         let downloadUrl = null;
         let urlCaptured = false;
@@ -349,12 +349,10 @@ async function getY2MateDownloadUrl(videoId, format = 'mp4', quality = '720p') {
             responseCount++;
             const url = response.url();
             
-            // Log first 15 responses for debugging
             if (responseCount <= 15) {
                 logNetwork(`Response ${responseCount}`, { url: url.substring(0, 100) });
             }
             
-            // ONLY capture actual download URLs (not convert, not progress, not auth)
             if (!urlCaptured && url) {
                 const isDownloadUrl = (
                     url.includes('/api/v1/download') &&
@@ -362,14 +360,12 @@ async function getY2MateDownloadUrl(videoId, format = 'mp4', quality = '720p') {
                     url.includes('f=')
                 );
                 
-                // Also check for direct file URLs
                 const isDirectFile = (
                     url.includes('.mp4') || 
                     url.includes('.mp3')
                 );
                 
                 if (isDownloadUrl || isDirectFile) {
-                    // Skip analytics/tracking
                     if (!url.includes('google-analytics') && 
                         !url.includes('analytics') && 
                         !url.includes('tracking')) {
@@ -508,7 +504,7 @@ async function getY2MateDownloadUrl(videoId, format = 'mp4', quality = '720p') {
         logSuccess('Conversion wait complete');
         
         // ============================================================
-        // STEP 9: Click Download button - This triggers the actual download URL
+        // STEP 9: Click Download button
         // ============================================================
         logStep('Step 9', 'Clicking Download button');
         try {
@@ -524,20 +520,17 @@ async function getY2MateDownloadUrl(videoId, format = 'mp4', quality = '720p') {
         }
         
         // ============================================================
-        // STEP 10: Wait for the actual download URL to appear
+        // STEP 10: Wait for the actual download URL
         // ============================================================
         logStep('Step 10', 'Waiting for actual download URL (10s)');
-        
-        // Wait up to 15 seconds for the download URL
         let waitTime = 0;
-        const maxWait = 15000;
+        const maxWait = 10000;
         const checkInterval = 500;
         
         while (!urlCaptured && waitTime < maxWait) {
             await page.waitForTimeout(checkInterval);
             waitTime += checkInterval;
             
-            // Log every 2 seconds
             if (waitTime % 2000 === 0) {
                 logStep('Step 10', `Still waiting for download URL... (${waitTime/1000}s)`);
             }
@@ -546,7 +539,7 @@ async function getY2MateDownloadUrl(videoId, format = 'mp4', quality = '720p') {
         if (urlCaptured) {
             logSuccess(`Download URL captured after ${waitTime}ms`);
         } else {
-            logWarning(`Download URL not captured after ${waitTime}ms, trying HTML search`);
+            logWarning(`Download URL not captured after ${waitTime}ms, searching HTML`);
         }
         
         // ============================================================
@@ -573,12 +566,10 @@ async function getY2MateDownloadUrl(videoId, format = 'mp4', quality = '720p') {
             logStep('Step 12', 'Searching HTML for download URL');
             const pageHtml = await page.content();
             
-            // Look for the specific download URL pattern
             const downloadPattern = /https?:\/\/[^\s"']*etacloud\.org\/api\/v1\/download[^\s"']*f=(mp4|mp3)[^\s"']*/gi;
             const matches = pageHtml.match(downloadPattern);
             
             if (matches && matches.length > 0) {
-                // Get the correct format
                 for (const match of matches) {
                     if (format === 'mp4' && match.includes('f=mp4')) {
                         downloadUrl = match;
@@ -593,7 +584,6 @@ async function getY2MateDownloadUrl(videoId, format = 'mp4', quality = '720p') {
             }
             
             if (!downloadUrl) {
-                // Try to find any etacloud URL with download
                 const anyDownload = pageHtml.match(/https?:\/\/[^\s"']*etacloud\.org\/api\/v1\/download[^\s"']*/gi);
                 if (anyDownload && anyDownload.length > 0) {
                     downloadUrl = anyDownload[0];
@@ -608,9 +598,8 @@ async function getY2MateDownloadUrl(videoId, format = 'mp4', quality = '720p') {
         // STEP 13: Validate the download URL
         // ============================================================
         if (downloadUrl && (downloadUrl.includes('/convert') || downloadUrl.includes('/progress') || downloadUrl.includes('/auth'))) {
-            logWarning(`Download URL is convert/progress/auth, trying to find real download`, { url: downloadUrl.substring(0, 100) });
+            logWarning(`Download URL is convert/progress/auth, trying to find real download`);
             
-            // Try to find the real download URL in the page one more time
             const pageHtml = await page.content();
             const realDownloadPattern = /https?:\/\/[^\s"']*etacloud\.org\/api\/v1\/download[^\s"']*f=(mp4|mp3)[^\s"']*/gi;
             const realMatches = pageHtml.match(realDownloadPattern);
@@ -658,7 +647,7 @@ async function getY2MateDownloadUrl(videoId, format = 'mp4', quality = '720p') {
 }
 
 // ============================================================
-// STREAM FILE
+// STREAM FILE - Non-blocking streaming
 // ============================================================
 
 async function streamFile(url, filename, res) {
@@ -704,6 +693,7 @@ async function streamFile(url, filename, res) {
         response.data.pipe(res);
         logSuccess('Stream started');
         
+        // Clean up when done
         response.data.on('end', () => {
             logSuccess('Stream complete', { filename });
         });
@@ -724,7 +714,7 @@ async function streamFile(url, filename, res) {
 }
 
 // ============================================================
-// API ENDPOINTS
+// API ENDPOINTS - Fully concurrent
 // ============================================================
 
 app.post('/api/download', async (req, res) => {
@@ -827,6 +817,18 @@ app.get('/api/download/:videoId', async (req, res) => {
     }
 });
 
+app.get('/api/pool', (req, res) => {
+    logStep('Pool Stats', 'Requested pool statistics');
+    res.json({
+        pool: browserPool.getStats(),
+        cache: {
+            size: videoCache.size(),
+            maxSize: MAX_CACHE_SIZE,
+            ttl: CACHE_TTL
+        }
+    });
+});
+
 app.get('/api/health', (req, res) => {
     logStep('Health Check', 'Server health check');
     res.json({
@@ -867,6 +869,7 @@ app.listen(PORT, () => {
     console.log(`📊 Cache: ${MAX_CACHE_SIZE} items, TTL: ${CACHE_TTL/60000} minutes`);
     console.log(`📌 POST /api/download - Download video/audio`);
     console.log(`📌 GET /api/download/:videoId - Browser download`);
+    console.log(`📌 GET /api/pool - Pool statistics`);
     console.log(`📌 GET /api/health - Health check`);
     console.log(`📁 Temp directory: ${TEMP_DIR}`);
     console.log(`📸 Screenshots: ${SCREENSHOT_DIR}`);
