@@ -339,7 +339,7 @@ async function getY2MateDownloadUrl(videoId, format = 'mp4', quality = '720p') {
         logSuccess('Context and page created');
         
         // ============================================================
-        // ENHANCED NETWORK INTERCEPTION - Capture ONLY download URLs
+        // NETWORK INTERCEPTION - Capture ONLY download URLs (NOT convert)
         // ============================================================
         let downloadUrl = null;
         let urlCaptured = false;
@@ -349,36 +349,34 @@ async function getY2MateDownloadUrl(videoId, format = 'mp4', quality = '720p') {
             responseCount++;
             const url = response.url();
             
-            // Log first 10 responses for debugging
-            if (responseCount <= 10) {
+            // Log first 15 responses for debugging
+            if (responseCount <= 15) {
                 logNetwork(`Response ${responseCount}`, { url: url.substring(0, 100) });
             }
             
+            // ONLY capture actual download URLs (not convert, not progress, not auth)
             if (!urlCaptured && url) {
-                // ONLY capture actual download URLs (not auth, not progress)
                 const isDownloadUrl = (
-                    // Direct download URL patterns
-                    url.includes('/api/v1/download') ||
+                    url.includes('/api/v1/download') &&
+                    url.includes('sig=') &&
+                    url.includes('f=')
+                );
+                
+                // Also check for direct file URLs
+                const isDirectFile = (
                     url.includes('.mp4') || 
-                    url.includes('.mp3') ||
-                    // Y2Mate specific
-                    (url.includes('etacloud.org') && url.includes('sig=') && url.includes('f='))
+                    url.includes('.mp3')
                 );
                 
-                // Skip auth, progress, init endpoints
-                const isExcluded = (
-                    url.includes('/auth') ||
-                    url.includes('/progress') ||
-                    url.includes('/init') ||
-                    url.includes('google-analytics') ||
-                    url.includes('analytics') ||
-                    url.includes('tracking')
-                );
-                
-                if (isDownloadUrl && !isExcluded) {
-                    downloadUrl = url;
-                    urlCaptured = true;
-                    logNetwork(`${format.toUpperCase()} DOWNLOAD URL captured`, { url: url.substring(0, 100) });
+                if (isDownloadUrl || isDirectFile) {
+                    // Skip analytics/tracking
+                    if (!url.includes('google-analytics') && 
+                        !url.includes('analytics') && 
+                        !url.includes('tracking')) {
+                        downloadUrl = url;
+                        urlCaptured = true;
+                        logNetwork(`${format.toUpperCase()} DOWNLOAD URL captured`, { url: url.substring(0, 100) });
+                    }
                 }
             }
         });
@@ -510,7 +508,7 @@ async function getY2MateDownloadUrl(videoId, format = 'mp4', quality = '720p') {
         logSuccess('Conversion wait complete');
         
         // ============================================================
-        // STEP 9: Click Download button - This triggers the URL
+        // STEP 9: Click Download button - This triggers the actual download URL
         // ============================================================
         logStep('Step 9', 'Clicking Download button');
         try {
@@ -526,10 +524,30 @@ async function getY2MateDownloadUrl(videoId, format = 'mp4', quality = '720p') {
         }
         
         // ============================================================
-        // STEP 10: Wait for network response (5 seconds)
+        // STEP 10: Wait for the actual download URL to appear
         // ============================================================
-        logStep('Step 10', 'Waiting for network response (5s)');
-        await page.waitForTimeout(5000);
+        logStep('Step 10', 'Waiting for actual download URL (10s)');
+        
+        // Wait up to 15 seconds for the download URL
+        let waitTime = 0;
+        const maxWait = 15000;
+        const checkInterval = 500;
+        
+        while (!urlCaptured && waitTime < maxWait) {
+            await page.waitForTimeout(checkInterval);
+            waitTime += checkInterval;
+            
+            // Log every 2 seconds
+            if (waitTime % 2000 === 0) {
+                logStep('Step 10', `Still waiting for download URL... (${waitTime/1000}s)`);
+            }
+        }
+        
+        if (urlCaptured) {
+            logSuccess(`Download URL captured after ${waitTime}ms`);
+        } else {
+            logWarning(`Download URL not captured after ${waitTime}ms, trying HTML search`);
+        }
         
         // ============================================================
         // STEP 11: Extract title
@@ -549,7 +567,7 @@ async function getY2MateDownloadUrl(videoId, format = 'mp4', quality = '720p') {
         logSuccess('Title extracted', { title: videoTitle });
         
         // ============================================================
-        // STEP 12: Find download URL if not captured from network
+        // STEP 12: Search HTML for download URL if not captured
         // ============================================================
         if (!downloadUrl) {
             logStep('Step 12', 'Searching HTML for download URL');
@@ -587,11 +605,21 @@ async function getY2MateDownloadUrl(videoId, format = 'mp4', quality = '720p') {
         }
         
         // ============================================================
-        // STEP 13: Validate the download URL (not auth/progress)
+        // STEP 13: Validate the download URL
         // ============================================================
-        if (downloadUrl && (downloadUrl.includes('/auth') || downloadUrl.includes('/progress') || downloadUrl.includes('/init'))) {
-            logWarning(`Download URL looks like auth/progress, ignoring`, { url: downloadUrl.substring(0, 100) });
-            downloadUrl = null;
+        if (downloadUrl && (downloadUrl.includes('/convert') || downloadUrl.includes('/progress') || downloadUrl.includes('/auth'))) {
+            logWarning(`Download URL is convert/progress/auth, trying to find real download`, { url: downloadUrl.substring(0, 100) });
+            
+            // Try to find the real download URL in the page one more time
+            const pageHtml = await page.content();
+            const realDownloadPattern = /https?:\/\/[^\s"']*etacloud\.org\/api\/v1\/download[^\s"']*f=(mp4|mp3)[^\s"']*/gi;
+            const realMatches = pageHtml.match(realDownloadPattern);
+            if (realMatches && realMatches.length > 0) {
+                downloadUrl = realMatches[0];
+                logSuccess(`Found real download URL in HTML`, { url: downloadUrl.substring(0, 100) });
+            } else {
+                downloadUrl = null;
+            }
         }
         
         const totalTime = Date.now() - startTime;
@@ -714,16 +742,10 @@ app.post('/api/download', async (req, res) => {
     const cached = videoCache.get(cacheKey);
     
     if (cached && cached.url) {
-        // Validate cached URL is not auth/progress
-        if (!cached.url.includes('/auth') && !cached.url.includes('/progress')) {
-            logSuccess('Using cached download', { cacheKey });
-            await streamFile(cached.url, cached.filename || `${cached.title || 'video'}.${format}`, res);
-            videoCache.delete(cacheKey);
-            return;
-        } else {
-            logWarning('Cached URL is auth/progress, removing', { cacheKey });
-            videoCache.delete(cacheKey);
-        }
+        logSuccess('Using cached download', { cacheKey });
+        await streamFile(cached.url, cached.filename || `${cached.title || 'video'}.${format}`, res);
+        videoCache.delete(cacheKey);
+        return;
     }
     
     try {
@@ -734,15 +756,6 @@ app.post('/api/download', async (req, res) => {
             return res.status(404).json({ 
                 success: false, 
                 error: result.error || 'Could not get download URL' 
-            });
-        }
-        
-        // Validate URL is not auth/progress
-        if (result.downloadUrl.includes('/auth') || result.downloadUrl.includes('/progress')) {
-            logError('Invalid download URL (auth/progress)', { url: result.downloadUrl.substring(0, 100) });
-            return res.status(404).json({ 
-                success: false, 
-                error: 'Invalid download URL received' 
             });
         }
         
@@ -777,14 +790,10 @@ app.get('/api/download/:videoId', async (req, res) => {
     const cached = videoCache.get(cacheKey);
     
     if (cached && cached.url) {
-        if (!cached.url.includes('/auth') && !cached.url.includes('/progress')) {
-            logSuccess('Using cached download (GET)', { cacheKey });
-            await streamFile(cached.url, cached.filename || `${cached.title || 'video'}.${format}`, res);
-            videoCache.delete(cacheKey);
-            return;
-        } else {
-            videoCache.delete(cacheKey);
-        }
+        logSuccess('Using cached download (GET)', { cacheKey });
+        await streamFile(cached.url, cached.filename || `${cached.title || 'video'}.${format}`, res);
+        videoCache.delete(cacheKey);
+        return;
     }
     
     try {
@@ -795,14 +804,6 @@ app.get('/api/download/:videoId', async (req, res) => {
             return res.status(404).json({ 
                 success: false, 
                 error: result.error || 'Could not get download URL' 
-            });
-        }
-        
-        if (result.downloadUrl.includes('/auth') || result.downloadUrl.includes('/progress')) {
-            logError('Invalid download URL (auth/progress)', { url: result.downloadUrl.substring(0, 100) });
-            return res.status(404).json({ 
-                success: false, 
-                error: 'Invalid download URL received' 
             });
         }
         
