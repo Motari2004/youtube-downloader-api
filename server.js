@@ -338,21 +338,49 @@ async function getY2MateDownloadUrl(videoId, format = 'mp4', quality = '720p') {
         page = await context.newPage();
         logSuccess('Context and page created');
         
-        // Set up network interception
+        // ============================================================
+        // ENHANCED NETWORK INTERCEPTION - Capture etacloud.org URLs
+        // ============================================================
         let downloadUrl = null;
         let urlCaptured = false;
+        let responseCount = 0;
         
         context.on('response', async (response) => {
+            responseCount++;
             const url = response.url();
+            
+            // Log first 10 responses for debugging
+            if (responseCount <= 10) {
+                logNetwork(`Response ${responseCount}`, { url: url.substring(0, 100) });
+            }
+            
             if (!urlCaptured && url) {
-                if (format === 'mp4' && (url.includes('.mp4') || url.includes('googlevideo'))) {
-                    downloadUrl = url;
-                    urlCaptured = true;
-                    logNetwork('MP4 URL captured', { url: url.substring(0, 100) });
-                } else if (format === 'mp3' && (url.includes('.mp3') || url.includes('download'))) {
-                    downloadUrl = url;
-                    urlCaptured = true;
-                    logNetwork('MP3 URL captured', { url: url.substring(0, 100) });
+                // Check for video/audio URLs - Updated patterns
+                const isVideo = format === 'mp4' && (
+                    url.includes('.mp4') || 
+                    url.includes('googlevideo') ||
+                    url.includes('videoplayback') ||
+                    url.includes('etacloud.org') ||  // 👈 ADDED: Capture etacloud.org
+                    url.includes('coccoo.etacloud') ||  // 👈 ADDED
+                    url.includes('occcoc.etacloud') ||  // 👈 ADDED
+                    (url.includes('/api/v1/download') && url.includes('f=mp4'))  // 👈 ADDED
+                );
+                const isAudio = format === 'mp3' && (
+                    url.includes('.mp3') || 
+                    url.includes('audio') ||
+                    url.includes('download') ||
+                    (url.includes('/api/v1/download') && url.includes('f=mp3'))
+                );
+                
+                if (isVideo || isAudio) {
+                    // Skip analytics/tracking
+                    if (!url.includes('google-analytics') && 
+                        !url.includes('analytics') && 
+                        !url.includes('tracking')) {
+                        downloadUrl = url;
+                        urlCaptured = true;
+                        logNetwork(`${format.toUpperCase()} URL captured`, { url: url.substring(0, 100) });
+                    }
                 }
             }
         });
@@ -360,12 +388,11 @@ async function getY2MateDownloadUrl(videoId, format = 'mp4', quality = '720p') {
         logStep('Step 3', 'Navigating to Y2Mate.gs');
         await page.goto('https://y2mate.gs/', { waitUntil: 'networkidle', timeout: BROWSER_TIMEOUT });
         await page.waitForTimeout(2000);
-        logSuccess('Page loaded', { elapsed: `${Date.now() - startTime}ms` });
+        logSuccess('Page loaded', { elapsed: `${Date.now() - startTime}ms`, responses: responseCount });
         
         logStep('Step 4', 'Looking for input field');
         let inputField = null;
         
-        // Try multiple methods to find input
         try {
             inputField = page.getByRole('textbox', { name: 'Paste your YouTube link' });
             if (await inputField.isVisible({ timeout: 5000 })) {
@@ -478,14 +505,14 @@ async function getY2MateDownloadUrl(videoId, format = 'mp4', quality = '720p') {
         }
         
         // ============================================================
-        // STEP 8: Wait for conversion
+        // STEP 8: Wait for conversion (8 seconds)
         // ============================================================
         logStep('Step 8', 'Waiting for conversion (8s)');
         await page.waitForTimeout(8000);
         logSuccess('Conversion wait complete');
         
         // ============================================================
-        // STEP 9: Click Download button
+        // STEP 9: Click Download button - This triggers the URL
         // ============================================================
         logStep('Step 9', 'Clicking Download button');
         try {
@@ -493,19 +520,21 @@ async function getY2MateDownloadUrl(videoId, format = 'mp4', quality = '720p') {
             if (await downloadBtn.isVisible({ timeout: 5000 })) {
                 await downloadBtn.click();
                 logSuccess('Download button clicked');
+            } else {
+                logWarning('Download button not found');
             }
         } catch (e) {
-            logWarning('Download button not found', { error: e.message });
+            logWarning('Error clicking download button', { error: e.message });
         }
         
         // ============================================================
-        // STEP 10: Wait for network response
+        // STEP 10: Wait for network response (5 seconds)
         // ============================================================
         logStep('Step 10', 'Waiting for network response (5s)');
         await page.waitForTimeout(5000);
         
         // ============================================================
-        // STEP 11: Get video/audio title
+        // STEP 11: Extract title
         // ============================================================
         logStep('Step 11', 'Extracting title');
         let videoTitle = await page.evaluate(() => {
@@ -522,25 +551,46 @@ async function getY2MateDownloadUrl(videoId, format = 'mp4', quality = '720p') {
         logSuccess('Title extracted', { title: videoTitle });
         
         // ============================================================
-        // STEP 12: Find download URL if not captured
+        // STEP 12: Find download URL if not captured from network
         // ============================================================
         if (!downloadUrl) {
             logStep('Step 12', 'Searching HTML for download URL');
             const pageHtml = await page.content();
             
-            let pattern;
-            if (format === 'mp4') {
-                pattern = /https?:\/\/[^\s"']*\.mp4[^\s"']*/gi;
-            } else {
-                pattern = /https?:\/\/[^\s"']*\.mp3[^\s"']*/gi;
+            // Look for etacloud.org URLs (the ones we want)
+            const etacloudMatches = pageHtml.match(/https?:\/\/[^\s"']*etacloud\.org[^\s"']*/gi);
+            if (etacloudMatches && etacloudMatches.length > 0) {
+                // Filter to get the right format
+                for (const match of etacloudMatches) {
+                    if (format === 'mp4' && match.includes('f=mp4')) {
+                        downloadUrl = match;
+                        logSuccess(`Found MP4 URL in HTML (etacloud.org)`, { url: downloadUrl.substring(0, 100) });
+                        break;
+                    } else if (format === 'mp3' && match.includes('f=mp3')) {
+                        downloadUrl = match;
+                        logSuccess(`Found MP3 URL in HTML (etacloud.org)`, { url: downloadUrl.substring(0, 100) });
+                        break;
+                    }
+                }
             }
             
-            const matches = pageHtml.match(pattern);
-            if (matches && matches.length > 0) {
-                downloadUrl = matches[0];
-                logSuccess(`Found ${format.toUpperCase()} URL in HTML`, { url: downloadUrl.substring(0, 100) });
-            } else {
-                logWarning(`No ${format.toUpperCase()} URL found in HTML`);
+            // Fallback: look for any URL with the format
+            if (!downloadUrl) {
+                const pattern = format === 'mp4' ? /https?:\/\/[^\s"']*\/api\/v1\/download[^\s"']*f=mp4[^\s"']*/gi : /https?:\/\/[^\s"']*\/api\/v1\/download[^\s"']*f=mp3[^\s"']*/gi;
+                const matches = pageHtml.match(pattern);
+                if (matches && matches.length > 0) {
+                    downloadUrl = matches[0];
+                    logSuccess(`Found ${format.toUpperCase()} URL in HTML (fallback)`, { url: downloadUrl.substring(0, 100) });
+                } else {
+                    // Try to find any etacloud URL
+                    const anyMatches = pageHtml.match(/https?:\/\/[^\s"']*etacloud\.org[^\s"']*/gi);
+                    if (anyMatches && anyMatches.length > 0) {
+                        downloadUrl = anyMatches[0];
+                        logSuccess(`Found etacloud.org URL in HTML (any)`, { url: downloadUrl.substring(0, 100) });
+                    } else {
+                        logWarning(`No ${format.toUpperCase()} URL found in HTML`);
+                    }
+                }
             }
         }
         
